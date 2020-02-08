@@ -15,6 +15,7 @@
 #include <math.h>
 #include <map>
 #include <unordered_set>
+#include <mutex>
 
 #include "image.h"
 
@@ -146,15 +147,20 @@ struct BufferPoolEntry
 {
     id<MTLBuffer> buffer;
     size_t length = 0;
+    mutable uint64_t last_accessed = 0;
     mutable int reference_count = 1;
 };
 
-
+std::mutex m_bufferpool_mutex;
+const uint64_t time_before_eviction = 10;
+uint64_t m_current_frames = 0;
 std::multimap<size_t, BufferPoolEntry const*> m_free_entries;
 std::unordered_set<BufferPoolEntry const*> m_used_entries;
 
-BufferPoolEntry const* aquireBuffer(id<MTLDevice> device, size_t num_bytes)
+BufferPoolEntry const* aquire_buffer(id<MTLDevice> device, size_t num_bytes)
 {
+    std::lock_guard<std::mutex> lock(m_bufferpool_mutex);
+
     auto iter = m_free_entries.lower_bound(num_bytes);
     if (iter != m_free_entries.end())
     {
@@ -169,13 +175,18 @@ BufferPoolEntry const* aquireBuffer(id<MTLDevice> device, size_t num_bytes)
     BufferPoolEntry* entry = new BufferPoolEntry({
         .buffer = buffer,
         .length = num_bytes,
+        .last_accessed = m_current_frames,
         .reference_count = 1,
     });
     m_used_entries.insert(entry);
+    
+    return entry;
 }
 
-void releaseBuffer(id<MTLDevice> device, BufferPoolEntry const* entry)
+void release_buffer(id<MTLDevice> device, BufferPoolEntry const* entry)
 {
+    std::lock_guard<std::mutex> lock(m_bufferpool_mutex);
+    
     entry->reference_count--;
     if (entry->reference_count > 0)
         return;
@@ -188,7 +199,31 @@ void releaseBuffer(id<MTLDevice> device, BufferPoolEntry const* entry)
 
 void gc()
 {
+    std::lock_guard<std::mutex> lock(m_bufferpool_mutex);
+
+    m_current_frames++;
     
+    const uint64_t eviction_time = m_current_frames - time_before_eviction;
+    decltype(m_free_entries) stages;
+    stages.swap(m_free_entries);
+    
+    for (auto stage : stages)
+    {
+        if (stage.second->last_accessed < eviction_time)
+            delete stage.second;
+        else
+            m_free_entries.insert(stage);
+    }
+}
+
+void reset()
+{
+    std::lock_guard<std::mutex> lock(m_bufferpool_mutex);
+
+    assert(m_used_entries.empty());
+    for (auto stage : m_free_entries)
+        delete stage.second;
+    m_free_entries.clear();
 }
 
 int main (int argc, char *args[])
@@ -207,13 +242,12 @@ int main (int argc, char *args[])
     
     id<MTLFunction> vertexFunction = createFunction(gpu, vertex_shader_src);
     id<MTLFunction> fragmentFunction = createFunction(gpu, fragment_shader_src);
-    
 
     MTLRenderPipelineDescriptor *pipelineDesc = [MTLRenderPipelineDescriptor new];
     pipelineDesc.vertexFunction = vertexFunction;
     pipelineDesc.fragmentFunction = fragmentFunction;
     pipelineDesc.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
-    id<MTLRenderPipelineState> pipelineState = [gpu newRenderPipelineStateWithDescriptor:pipelineDesc error:&error];
+    id<MTLRenderPipelineState> pipeline_state = [gpu newRenderPipelineStateWithDescriptor:pipelineDesc error:&error];
     
     el::ImageDataPtr miku;
     miku = el::ImageData::load_memory(miku_image_binray, miku_image_len);
@@ -246,12 +280,13 @@ int main (int argc, char *args[])
         { {-1,  3, 0, 1}, {0, 2} },
     };
     
-    id<MTLBuffer> vertexBuffer = [gpu newBufferWithBytes:fulltriangle length:sizeof(fulltriangle) options:MTLResourceOptionCPUCacheModeDefault];
+    id<MTLBuffer> vertex_buffer = [gpu newBufferWithBytes:fulltriangle
+                                                   length:sizeof(fulltriangle)
+                                                  options:MTLResourceOptionCPUCacheModeDefault];
     
     static const uint32_t kInFlightCommandBuffers = 3;
 
     dispatch_semaphore_t m_InflightSemaphore = dispatch_semaphore_create(kInFlightCommandBuffers);
-
 
     bool quit = false;
     SDL_Event e;
@@ -276,20 +311,19 @@ int main (int argc, char *args[])
 
             id<MTLCommandBuffer> buffer = [queue commandBuffer];
             id<MTLRenderCommandEncoder> encoder = [buffer renderCommandEncoderWithDescriptor:pass];
-            [encoder setRenderPipelineState:pipelineState];
+            [encoder setRenderPipelineState:pipeline_state];
             [encoder setFragmentTexture:texture atIndex:0];
-            [encoder setVertexBuffer:vertexBuffer offset:0 atIndex:0];
+            [encoder setVertexBuffer:vertex_buffer offset:0 atIndex:0];
             [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
             [encoder endEncoding];
-            [buffer presentDrawable:surface afterMinimumDuration:1.0/60];
+            [buffer presentDrawable:surface];
             
             //Dispatch the command buffer
             __block dispatch_semaphore_t dispatchSemaphore = m_InflightSemaphore;
 
-            [buffer addCompletedHandler:^(id <MTLCommandBuffer> cmdb){
+            [buffer addCompletedHandler:^(id <MTLCommandBuffer> cmdb) {
                 dispatch_semaphore_signal(dispatchSemaphore);
             }];
-            
             [buffer commit];
         }
     }
