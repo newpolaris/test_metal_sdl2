@@ -16,6 +16,8 @@
 #include <map>
 #include <unordered_set>
 #include <mutex>
+#include <set>
+#include <functional>
 
 #include "image.h"
 
@@ -142,91 +144,232 @@ void debug_output(const char* message)
 // TODO:
 // https://developer.apple.com/documentation/metal/copying_data_to_a_private_resource?language=objc
 
-// From filament's buffer managing
-struct BufferPoolEntry
+namespace buffer_pool {
+
+    // From filament's buffer managing
+    struct stage_t
+    {
+        id<MTLBuffer> buffer;
+        size_t length = 0;
+        mutable uint64_t last_accessed = 0;
+        mutable int reference_count = 1;
+    };
+
+    std::mutex m_mutex;
+    const uint64_t time_before_eviction = 10;
+    uint64_t m_current_frames = 0;
+    std::multimap<size_t, stage_t const*> m_free_stages;
+    std::unordered_set<stage_t const*> m_used_stages;
+
+    stage_t const* aquire_buffer(id<MTLDevice> device, size_t num_bytes)
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+
+        auto iter = m_free_stages.lower_bound(num_bytes);
+        if (iter != m_free_stages.end())
+        {
+            auto stage = iter->second;
+            m_free_stages.erase(iter);
+            m_used_stages.insert(stage);
+            stage->reference_count = 1;
+            return stage;
+        }
+        
+        id<MTLBuffer> buffer = [device newBufferWithLength:num_bytes options:MTLResourceStorageModeShared];
+        stage_t* stage = new stage_t({
+            .buffer = buffer,
+            .length = num_bytes,
+            .last_accessed = m_current_frames,
+            .reference_count = 1,
+        });
+        m_used_stages.insert(stage);
+        
+        return stage;
+    }
+
+    void retain_buffer(stage_t const* stage)
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        
+        stage->reference_count++;
+    }
+
+    void release_buffer(stage_t const* stage)
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        
+        stage->reference_count--;
+        if (stage->reference_count > 0)
+            return;
+        auto iter = m_used_stages.find(stage);
+        assert(iter != m_used_stages.end());
+        
+        stage->last_accessed = m_current_frames;
+
+        m_used_stages.erase(iter);
+        m_free_stages.insert({stage->length, stage});
+    }
+
+    void gc()
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+
+        m_current_frames++;
+        
+        const uint64_t eviction_time = m_current_frames - time_before_eviction;
+        decltype(m_free_stages) stages;
+        stages.swap(m_free_stages);
+        
+        for (auto stage : stages)
+        {
+            if (stage.second->last_accessed < eviction_time) {
+                [stage.second->buffer release];
+                delete stage.second;
+            }
+            else
+            {
+                m_free_stages.insert(stage);
+            }
+        }
+    }
+
+    void reset()
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+
+        assert(m_used_stages.empty());
+        for (auto stage : m_free_stages) {
+            [stage.second->buffer release];
+            delete stage.second;
+        }
+        m_free_stages.clear();
+    }
+
+} // namespace buffer_pool
+
+struct resource_tracker_t
 {
-    id<MTLBuffer> buffer;
-    size_t length = 0;
-    mutable uint64_t last_accessed = 0;
-    mutable int reference_count = 1;
+    using command_buffer_t = void*;
+    using resource_t = const void*;
+    using deleter_t = std::function<void(resource_t)>;
+    
+    bool track_resource(command_buffer_t buffer, resource_t stage, deleter_t deleter);
+    void clear_resouce(command_buffer_t buffer);
+    
+    struct entry_t
+    {
+        resource_t resource;
+        deleter_t deleter;
+        
+        bool operator<(const entry_t& other) const
+        {
+            return resource < other.resource;
+        }
+    };
+    
+    using resource_set_t = std::set<entry_t>;
+    std::map<command_buffer_t, resource_set_t> _resources;
+} m_resource_tracker;
+
+bool resource_tracker_t::track_resource(command_buffer_t buffer, resource_t stage, deleter_t deleter)
+{
+    auto found = _resources.find(buffer);
+    if (found == _resources.end())
+    {
+        resource_set_t& resource_set = _resources[buffer] = {};
+        resource_set.insert({ stage, deleter });
+        return true;
+    }
+    
+    resource_set_t& resource_set = found->second;
+    auto inserted = resource_set.insert({ stage, deleter });
+    return inserted.second;
+}
+
+void resource_tracker_t::clear_resouce(command_buffer_t buffer)
+{
+    auto found = _resources.find(buffer);
+    if (found == _resources.end()) {
+        return;
+    }
+
+    for (const auto& resource : found->second) {
+        resource.deleter(resource.resource);
+    }
+    _resources.erase(found);
+}
+
+struct metal_buffer final
+{
+    metal_buffer(id<MTLDevice> device, uint32_t size);
+    ~metal_buffer();
+    
+    void copy_into_buffer(void* src, size_t size);
+    id<MTLBuffer> get_gpu_buffer(id<MTLCommandBuffer> command);
+
+    id<MTLDevice> _device = nil;
+    buffer_pool::stage_t const* _stage = nullptr;
+    uint32_t _size = 0;
 };
 
-std::mutex m_bufferpool_mutex;
-const uint64_t time_before_eviction = 10;
-uint64_t m_current_frames = 0;
-std::multimap<size_t, BufferPoolEntry const*> m_free_entries;
-std::unordered_set<BufferPoolEntry const*> m_used_entries;
-
-BufferPoolEntry const* aquire_buffer(id<MTLDevice> device, size_t num_bytes)
+metal_buffer::metal_buffer(id<MTLDevice> device, uint32_t size) :
+    _device(device),
+    _size(size)
 {
-    std::lock_guard<std::mutex> lock(m_bufferpool_mutex);
-
-    auto iter = m_free_entries.lower_bound(num_bytes);
-    if (iter != m_free_entries.end())
-    {
-        auto entry = iter->second;
-        m_free_entries.erase(iter);
-        m_used_entries.insert(entry);
-        entry->reference_count = 1;
-        return entry;
-    }
-    
-    id<MTLBuffer> buffer = [device newBufferWithLength:num_bytes options:MTLResourceStorageModeShared];
-    BufferPoolEntry* entry = new BufferPoolEntry({
-        .buffer = buffer,
-        .length = num_bytes,
-        .last_accessed = m_current_frames,
-        .reference_count = 1,
-    });
-    m_used_entries.insert(entry);
-    
-    return entry;
 }
 
-void release_buffer(id<MTLDevice> device, BufferPoolEntry const* entry)
+metal_buffer::~metal_buffer()
 {
-    std::lock_guard<std::mutex> lock(m_bufferpool_mutex);
-    
-    entry->reference_count--;
-    if (entry->reference_count > 0)
-        return;
-    auto iter = m_used_entries.find(entry);
-    if (iter == m_used_entries.end())
-        return;
-    m_used_entries.erase(iter);
-    m_free_entries.insert({entry->length, entry});
+    buffer_pool::release_buffer(_stage);
+    _stage = nil;
+    _device = nil;
 }
 
-void gc()
+void metal_buffer::copy_into_buffer(void* src, size_t size)
 {
-    std::lock_guard<std::mutex> lock(m_bufferpool_mutex);
+    assert(size <= _size);
+    
+    // We're about to acquire a new buffer to hold the new contents. If we previously had obtained a
+    // buffer we release it, decrementing its reference count, as we no longer needs it.
+    if (_stage != nullptr)
+        buffer_pool::release_buffer(_stage);
 
-    m_current_frames++;
-    
-    const uint64_t eviction_time = m_current_frames - time_before_eviction;
-    decltype(m_free_entries) stages;
-    stages.swap(m_free_entries);
-    
-    for (auto stage : stages)
-    {
-        if (stage.second->last_accessed < eviction_time)
-            delete stage.second;
-        else
-            m_free_entries.insert(stage);
+    _stage = buffer_pool::aquire_buffer(_device, size);
+    if (_stage != nullptr) {
+        void* data = _stage->buffer.contents;
+        memcpy(data, src, size);
     }
 }
 
-void reset()
+id<MTLBuffer> metal_buffer::get_gpu_buffer(id<MTLCommandBuffer> command)
 {
-    std::lock_guard<std::mutex> lock(m_bufferpool_mutex);
-
-    assert(m_used_entries.empty());
-    for (auto stage : m_free_entries)
-        delete stage.second;
-    m_free_entries.clear();
+    if (_stage == nullptr) {
+        _stage = buffer_pool::aquire_buffer(_device, _size);
+    }
+    auto deleter = [](const void* resource) {
+        auto stage = reinterpret_cast<buffer_pool::stage_t const*>(resource);
+        buffer_pool::release_buffer(stage);
+    };
+    if (m_resource_tracker.track_resource((__bridge void*)command, _stage, deleter)) {
+        buffer_pool::retain_buffer(_stage);
+    }
+    
+    return _stage->buffer;
 }
 
-int main (int argc, char *args[])
+void terminate(id<MTLCommandQueue> command_queue)
+{
+    // Wait for all frames to finish by submitting and waiting on a dummy command buffer.
+    // This must be done before calling bufferPool->reset() to ensure no buffers are in flight.
+    id<MTLCommandBuffer> oneOffBuffer = [command_queue commandBuffer];
+    [oneOffBuffer commit];
+    [oneOffBuffer waitUntilCompleted];
+    
+    buffer_pool::reset();
+    [command_queue release];
+}
+
+int main(int argc, char *args[])
 {
     SDL_SetHint(SDL_HINT_RENDER_DRIVER, "metal");
     SDL_InitSubSystem(SDL_INIT_VIDEO);
@@ -300,8 +443,24 @@ int main (int argc, char *args[])
         
         @autoreleasepool {
             
+#if 0
+            void* vbFilamentData = malloc(nVbBytes);
+            memcpy(vbFilamentData, vbImguiData, nVbBytes);
+            mVertexBuffers[bufferIndex]->setBufferAt(*mEngine, 0,
+                    VertexBuffer::BufferDescriptor(vbFilamentData, nVbBytes,
+                        [](void* buffer, size_t size, void* user) {
+                            free(buffer);
+                        }, /* user = */ nullptr));
+#endif
+            
             dispatch_semaphore_wait(m_InflightSemaphore, DISPATCH_TIME_FOREVER);
 
+            id<MTLCommandBuffer> buffer = [queue commandBuffer];
+
+            [buffer addCompletedHandler:^(id<MTLCommandBuffer> command) {
+                m_resource_tracker.clear_resouce(command);
+            }];
+            
             id<CAMetalDrawable> surface = [swapchain nextDrawable];
             MTLRenderPassDescriptor *pass = [MTLRenderPassDescriptor renderPassDescriptor];
             pass.colorAttachments[0].clearColor = color;
@@ -309,16 +468,19 @@ int main (int argc, char *args[])
             pass.colorAttachments[0].storeAction = MTLStoreActionStore;
             pass.colorAttachments[0].texture = surface.texture;
 
-            id<MTLCommandBuffer> buffer = [queue commandBuffer];
+            size_t size = sizeof(fulltriangle);
+            metal_buffer vertex_buffer(gpu, size);
+            vertex_buffer.copy_into_buffer(fulltriangle, size);
+            id<MTLBuffer> gpu_buffer = vertex_buffer.get_gpu_buffer(buffer);
             id<MTLRenderCommandEncoder> encoder = [buffer renderCommandEncoderWithDescriptor:pass];
             [encoder setRenderPipelineState:pipeline_state];
             [encoder setFragmentTexture:texture atIndex:0];
-            [encoder setVertexBuffer:vertex_buffer offset:0 atIndex:0];
+            [encoder setVertexBuffer:gpu_buffer offset:0 atIndex:0];
             [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
             [encoder endEncoding];
             [buffer presentDrawable:surface];
             
-            //Dispatch the command buffer
+            // dispatch the command buffer
             __block dispatch_semaphore_t dispatchSemaphore = m_InflightSemaphore;
 
             [buffer addCompletedHandler:^(id <MTLCommandBuffer> cmdb) {
@@ -327,7 +489,9 @@ int main (int argc, char *args[])
             [buffer commit];
         }
     }
-
+    
+    terminate(queue);
+    
     SDL_DestroyWindow(window);
     SDL_Quit();
 
