@@ -331,9 +331,9 @@ void metal_buffer::copy_into_buffer(void* src, size_t size)
     
     // We're about to acquire a new buffer to hold the new contents. If we previously had obtained a
     // buffer we release it, decrementing its reference count, as we no longer needs it.
-    if (_stage != nullptr)
+    if (_stage != nullptr) {
         buffer_pool::release_buffer(_stage);
-
+    }
     _stage = buffer_pool::aquire_buffer(_device, size);
     if (_stage != nullptr) {
         void* data = _stage->buffer.contents;
@@ -367,6 +367,121 @@ void terminate(id<MTLCommandQueue> command_queue)
     
     buffer_pool::reset();
     [command_queue release];
+}
+
+class BufferDescriptor
+{
+public:
+    
+    using Callback = void(*)(void* buffer, size_t size, void* user);
+    
+    BufferDescriptor() noexcept = default;
+    
+    ~BufferDescriptor() noexcept {
+        if (callback) {
+            callback(buffer, size, user);
+        }
+    }
+    
+    BufferDescriptor(const BufferDescriptor& rhs) = default;
+    BufferDescriptor& operator=(const BufferDescriptor& rhs) = delete;
+    
+    BufferDescriptor(BufferDescriptor&& rhs) noexcept
+    : buffer(rhs.buffer), size(rhs.size), callback(rhs.callback), user(rhs.user) {
+        rhs.buffer = nullptr;
+        rhs.callback = nullptr;
+    }
+    
+    BufferDescriptor& operator=(BufferDescriptor&& rhs) noexcept {
+         if (this != &rhs) {
+             buffer = rhs.buffer;
+             size = rhs.size;
+             callback = rhs.callback;
+             user = rhs.user;
+             rhs.buffer = nullptr;
+             rhs.callback = nullptr;
+         }
+         return *this;
+     }
+
+
+     BufferDescriptor(void const* buffer, size_t size,
+             Callback callback = nullptr, void* user = nullptr) noexcept
+                 : buffer(const_cast<void*>(buffer)), size(size), callback(callback), user(user) {
+     }
+
+    void setCallback(Callback callback, void* user = nullptr) noexcept {
+        this->callback = callback;
+        this->user = user;
+    }
+
+    //! Returns whether a release callback is set
+    bool hasCallback() const noexcept { return callback != nullptr; }
+
+    //! Returns the currently set release callback function
+    Callback getCallback() const noexcept {
+        return callback;
+    }
+
+    //! Returns the user opaque pointer associated to this BufferDescriptor
+    void* getUser() const noexcept {
+        return user;
+    }
+
+    //! CPU mempry-buffer virtual address
+    void* buffer = nullptr;
+
+    //! CPU memory-buffer size in bytes
+    size_t size = 0;
+
+private:
+    // callback when the buffer is consumed.
+    Callback callback = nullptr;
+    void* user = nullptr;
+};
+
+class VertexBuffer
+{
+public:
+    
+};
+
+std::mutex mPurgeLock;
+std::vector<BufferDescriptor> mBufferToPurge;
+
+void scheduleDestroySlow(BufferDescriptor&& buffer) noexcept {
+    std::lock_guard<std::mutex> lock(mPurgeLock);
+    mBufferToPurge.push_back(std::move(buffer));
+}
+
+void purge() noexcept {
+    std::vector<BufferDescriptor> buffersToPurge;
+    
+    std::unique_lock<std::mutex> lock(mPurgeLock);
+    std::swap(buffersToPurge, mBufferToPurge);
+}
+
+void scheduleDestroy(BufferDescriptor&& buffer) noexcept
+{
+    if (buffer.hasCallback()) {
+        scheduleDestroySlow(std::move(buffer));
+    }
+}
+
+void setBuffer(BufferDescriptor&& buffer)
+{
+    scheduleDestroy(std::move(buffer));
+}
+
+void populate_vertex_data(void* data, size_t size_in_bytes)
+{
+    void* vertex_data = malloc(size_in_bytes);
+    memcpy(vertex_data, data, size_in_bytes);
+    
+    setBuffer(BufferDescriptor(vertex_data, size_in_bytes,
+                     [](void* buffer, size_t size, void* user) {
+        free(buffer);
+    }, /* user = */ nullptr));
 }
 
 int main(int argc, char *args[])
@@ -443,18 +558,11 @@ int main(int argc, char *args[])
         
         @autoreleasepool {
             
-#if 0
-            void* vbFilamentData = malloc(nVbBytes);
-            memcpy(vbFilamentData, vbImguiData, nVbBytes);
-            mVertexBuffers[bufferIndex]->setBufferAt(*mEngine, 0,
-                    VertexBuffer::BufferDescriptor(vbFilamentData, nVbBytes,
-                        [](void* buffer, size_t size, void* user) {
-                            free(buffer);
-                        }, /* user = */ nullptr));
-#endif
-            
             dispatch_semaphore_wait(m_InflightSemaphore, DISPATCH_TIME_FOREVER);
 
+            std::vector<char> data(100);
+            populate_vertex_data(data.data(), sizeof(char)*100);
+            
             id<MTLCommandBuffer> buffer = [queue commandBuffer];
 
             [buffer addCompletedHandler:^(id<MTLCommandBuffer> command) {
@@ -487,6 +595,13 @@ int main(int argc, char *args[])
                 dispatch_semaphore_signal(dispatchSemaphore);
             }];
             [buffer commit];
+            
+            // while flushCommandBuffer (main thread)
+            purge();
+            // and execute commandQueue.flush();
+            
+            // endFrame - second thread
+            buffer_pool::gc();
         }
     }
     
