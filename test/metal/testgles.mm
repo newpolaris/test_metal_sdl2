@@ -517,9 +517,6 @@ void render_background_texture()
         { {-1,  3}, {0, 2} },
     };
 
-    // std::vector<char> data(100);
-    // populate_vertex_data(data.data(), sizeof(char)*100);
-
     id<MTLCommandBuffer> command_buffer = [command_queue commandBuffer];
 
     [command_buffer addCompletedHandler:^(id<MTLCommandBuffer> command) {
@@ -535,36 +532,43 @@ void render_background_texture()
     pass.colorAttachments[0].texture = surface.texture;
 
     encoder = [command_buffer renderCommandEncoderWithDescriptor:pass];
+
     [encoder setRenderPipelineState:pipeline_state];
     [encoder setFragmentTexture:texture atIndex:0];
+    
+    std::vector<char> vertices(num_frac*sizeof(float)*24);
+    auto* data = vertices.data();
+    for (int i = 0; i < num_frac; ++i)
+    {
+        float sx = -1.f + 2.f / num_frac * i;
+        float ex = -1.f + 2.f / num_frac * (i + 1);
+        float tsx = 0.f + 1.f / num_frac * i;
+        float tex = 0.f + 1.f / num_frac * (i + 1);
 
-    for (int i = 0; i < 1; i++) {
-        for (int i = 0; i < num_frac; ++i)
-        {
-            float sx = -1.f + 2.f / num_frac * i;
-            float ex = -1.f + 2.f / num_frac * (i + 1);
-            float tsx = 0.f + 1.f / num_frac * i;
-            float tex = 0.f + 1.f / num_frac * (i + 1);
-            
-            float vertices[] = {
-                sx, -1.0, tsx, 0.0,
-                ex, -1.0, tex, 0.0,
-                sx, 1.0, tsx, 1.0,
+        float subvertex[] = {
+           sx, -1.0, tsx, 0.0,
+           ex, -1.0, tex, 0.0,
+           sx, 1.0, tsx, 1.0,
 
-                sx, 1.0, tsx, 1.0,
-                ex, -1.0, tex, 0.0,
-                ex, 1.0, tex, 1.0,
-            };
-
-            size_t size = sizeof(vertices);
-            metal_buffer vertex_buffer(gpu, size);
-            vertex_buffer.copy_into_buffer(vertices, size);
-            id<MTLBuffer> gpu_buffer = vertex_buffer.get_gpu_buffer(command_buffer);
-
-            [encoder setVertexBuffer:gpu_buffer offset:0 atIndex:0];
+           sx, 1.0, tsx, 1.0,
+           ex, -1.0, tex, 0.0,
+           ex, 1.0, tex, 1.0,
+        };
+        memcpy(data + i * sizeof(float)*24, subvertex, sizeof(subvertex));
+    }
+    
+    //size_t size = vertices.size();
+    //metal_buffer vertex_buffer(gpu, size);
+    //vertex_buffer.copy_into_buffer(data, size);
+    //id<MTLBuffer> gpu_buffer = vertex_buffer.get_gpu_buffer(command_buffer);
+    
+    for (int k = 0; k < 5; k++) {
+        for (int i = 0; i < num_frac; i++) {
+            [encoder setVertexBytes:(data + i*sizeof(float)*24) length:sizeof(float)*24 atIndex:0];
             [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
         }
     }
+    
     [encoder endEncoding];
     
     [command_buffer presentDrawable:surface];
