@@ -557,14 +557,14 @@ void render_background_texture()
         memcpy(data + i * sizeof(float)*24, subvertex, sizeof(subvertex));
     }
     
-    //size_t size = vertices.size();
-    //metal_buffer vertex_buffer(gpu, size);
-    //vertex_buffer.copy_into_buffer(data, size);
-    //id<MTLBuffer> gpu_buffer = vertex_buffer.get_gpu_buffer(command_buffer);
-    
-    for (int k = 0; k < 5; k++) {
+    size_t size = vertices.size();
+    metal_buffer vertex_buffer(gpu, size);
+    vertex_buffer.copy_into_buffer(data, size);
+    id<MTLBuffer> gpu_buffer = vertex_buffer.get_gpu_buffer(command_buffer);
+    [encoder setVertexBuffer:gpu_buffer offset:0 atIndex:0];
+    for (int k = 0; k < 1; k++) {
         for (int i = 0; i < num_frac; i++) {
-            [encoder setVertexBytes:(data + i*sizeof(float)*24) length:sizeof(float)*24 atIndex:0];
+            [encoder setVertexBufferOffset:i*sizeof(4)*24 atIndex:0];
             [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
         }
     }
@@ -611,8 +611,8 @@ int main(int argc, char *args[])
     pipelineDesc.fragmentFunction = fragmentFunction;
     pipelineDesc.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
     pipeline_state = [gpu newRenderPipelineStateWithDescriptor:pipelineDesc
-                                                                                    error:&error];
-    
+                                                         error:&error];
+
     el::ImageDataPtr miku;
     miku = el::ImageData::load_memory(miku_image_binray, miku_image_len);
     assert(miku != nullptr);
