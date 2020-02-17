@@ -41,7 +41,7 @@ using namespace metal;
 
 typedef struct
 {
-    packed_float4 position;
+    packed_float2 position;
     packed_float2 texcoord;
 } vertex_t;
 
@@ -56,7 +56,7 @@ vertex RasterizerData main0(
                             unsigned int vID[[vertex_id]])
 {
     RasterizerData data;
-    data.clipSpacePosition = vertexArray[vID].position;
+    data.clipSpacePosition = float4(vertexArray[vID].position, 0, 1);
     data.textureCoordinate = vertexArray[vID].texcoord;
     return data;
 }
@@ -486,7 +486,7 @@ void populate_vertex_data(void* data, size_t size_in_bytes)
 
 namespace {
     const int max_frac = 10000;
-    int num_frac = 10;
+    int num_frac = 10000;
 }
 
 namespace {
@@ -500,7 +500,7 @@ namespace {
 }
 
 struct Vertex {
-    float position[4];
+    float position[2];
     float coord[2];
 };
 
@@ -512,9 +512,9 @@ void render_background_texture()
     dispatch_semaphore_wait(m_InflightSemaphore, DISPATCH_TIME_FOREVER);
 
     Vertex fulltriangle[] = {
-        { {-1, -1, 0, 1}, {0, 0} },
-        { { 3, -1, 0, 1}, {2, 0} },
-        { {-1,  3, 0, 1}, {0, 2} },
+        { {-1, -1}, {0, 0} },
+        { { 3, -1}, {2, 0} },
+        { {-1,  3}, {0, 2} },
     };
 
     // std::vector<char> data(100);
@@ -534,33 +534,14 @@ void render_background_texture()
     pass.colorAttachments[0].storeAction = MTLStoreActionStore;
     pass.colorAttachments[0].texture = surface.texture;
 
-    size_t size = sizeof(fulltriangle);
-    metal_buffer vertex_buffer(gpu, size);
-    vertex_buffer.copy_into_buffer(fulltriangle, size);
-    id<MTLBuffer> gpu_buffer = vertex_buffer.get_gpu_buffer(command_buffer);
+    // size_t size = sizeof(fulltriangle);
+    // metal_buffer vertex_buffer(gpu, size);
+    // vertex_buffer.copy_into_buffer(fulltriangle, size);
+    // id<MTLBuffer> gpu_buffer = vertex_buffer.get_gpu_buffer(command_buffer);
     encoder = [command_buffer renderCommandEncoderWithDescriptor:pass];
     [encoder setRenderPipelineState:pipeline_state];
     [encoder setFragmentTexture:texture atIndex:0];
-    [encoder setVertexBuffer:gpu_buffer offset:0 atIndex:0];
-    [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
-    [encoder endEncoding];
-    [command_buffer presentDrawable:surface];
 
-    // dispatch the command buffer
-    __block dispatch_semaphore_t dispatchSemaphore = m_InflightSemaphore;
-
-    [command_buffer addCompletedHandler:^(id <MTLCommandBuffer> cmdb) {
-        dispatch_semaphore_signal(dispatchSemaphore);
-    }];
-    [command_buffer commit];
-
-    // while flushCommandBuffer (main thread)
-    purge();
-    // and execute commandQueue.flush();
-
-    // endFrame - second thread
-    buffer_pool::gc();
-    
     for (int i = 0; i < num_frac; ++i)
     {
         float sx = -1.f + 2.f / num_frac * i;
@@ -578,17 +559,36 @@ void render_background_texture()
             ex, 1.0, tex, 1.0,
         };
 
-        uint32_t indices[] = { 0, 1, 2, 3, 4, 5 };
+        // id<MTLBuffer> vertex_buffer = [gpu newBufferWithBytes:vertices length:sizeof(vertices) options:MTLResourceStorageModeShared];
+        [encoder setVertexBytes:vertices length:sizeof(vertices) atIndex:0];
         
-        
+        [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
     }
+    [encoder endEncoding];
+    
+    [command_buffer presentDrawable:surface];
+
+    // dispatch the command buffer
+    __block dispatch_semaphore_t dispatchSemaphore = m_InflightSemaphore;
+
+    [command_buffer addCompletedHandler:^(id <MTLCommandBuffer> cmdb) {
+        dispatch_semaphore_signal(dispatchSemaphore);
+    }];
+    [command_buffer commit];
+    
+    // while flushCommandBuffer (main thread)
+    // purge();
+    // and execute commandQueue.flush();
+
+    // endFrame - second thread
+    // buffer_pool::gc();
 }
 
 int main(int argc, char *args[])
 {
     SDL_SetHint(SDL_HINT_RENDER_DRIVER, "metal");
     SDL_InitSubSystem(SDL_INIT_VIDEO);
-    SDL_Window *window = SDL_CreateWindow("SDL Metal", -1, -1, 640, 480, SDL_WINDOW_ALLOW_HIGHDPI);
+    SDL_Window *window = SDL_CreateWindow("SDL Metal", -1, -1, 1980, 1080, SDL_WINDOW_ALLOW_HIGHDPI);
     SDL_Renderer *renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED);
     swapchain = (__bridge CAMetalLayer *)SDL_RenderGetMetalLayer(renderer);
     
