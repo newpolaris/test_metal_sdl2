@@ -486,7 +486,7 @@ void populate_vertex_data(void* data, size_t size_in_bytes)
 
 namespace {
     const int max_frac = 10000;
-    int num_frac = 10000;
+    int num_frac = 5120;
 }
 
 namespace {
@@ -534,35 +534,36 @@ void render_background_texture()
     pass.colorAttachments[0].storeAction = MTLStoreActionStore;
     pass.colorAttachments[0].texture = surface.texture;
 
-    // size_t size = sizeof(fulltriangle);
-    // metal_buffer vertex_buffer(gpu, size);
-    // vertex_buffer.copy_into_buffer(fulltriangle, size);
-    // id<MTLBuffer> gpu_buffer = vertex_buffer.get_gpu_buffer(command_buffer);
     encoder = [command_buffer renderCommandEncoderWithDescriptor:pass];
     [encoder setRenderPipelineState:pipeline_state];
     [encoder setFragmentTexture:texture atIndex:0];
 
-    for (int i = 0; i < num_frac; ++i)
-    {
-        float sx = -1.f + 2.f / num_frac * i;
-        float ex = -1.f + 2.f / num_frac * (i + 1);
-        float tsx = 0.f + 1.f / num_frac * i;
-        float tex = 0.f + 1.f / num_frac * (i + 1);
-        
-        float vertices[] = {
-            sx, -1.0, tsx, 0.0,
-            ex, -1.0, tex, 0.0,
-            sx, 1.0, tsx, 1.0,
+    for (int i = 0; i < 1; i++) {
+        for (int i = 0; i < num_frac; ++i)
+        {
+            float sx = -1.f + 2.f / num_frac * i;
+            float ex = -1.f + 2.f / num_frac * (i + 1);
+            float tsx = 0.f + 1.f / num_frac * i;
+            float tex = 0.f + 1.f / num_frac * (i + 1);
+            
+            float vertices[] = {
+                sx, -1.0, tsx, 0.0,
+                ex, -1.0, tex, 0.0,
+                sx, 1.0, tsx, 1.0,
 
-            sx, 1.0, tsx, 1.0,
-            ex, -1.0, tex, 0.0,
-            ex, 1.0, tex, 1.0,
-        };
+                sx, 1.0, tsx, 1.0,
+                ex, -1.0, tex, 0.0,
+                ex, 1.0, tex, 1.0,
+            };
 
-        // id<MTLBuffer> vertex_buffer = [gpu newBufferWithBytes:vertices length:sizeof(vertices) options:MTLResourceStorageModeShared];
-        [encoder setVertexBytes:vertices length:sizeof(vertices) atIndex:0];
-        
-        [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+            size_t size = sizeof(vertices);
+            metal_buffer vertex_buffer(gpu, size);
+            vertex_buffer.copy_into_buffer(vertices, size);
+            id<MTLBuffer> gpu_buffer = vertex_buffer.get_gpu_buffer(command_buffer);
+
+            [encoder setVertexBuffer:gpu_buffer offset:0 atIndex:0];
+            [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+        }
     }
     [encoder endEncoding];
     
@@ -577,11 +578,11 @@ void render_background_texture()
     [command_buffer commit];
     
     // while flushCommandBuffer (main thread)
-    // purge();
+    purge();
     // and execute commandQueue.flush();
 
     // endFrame - second thread
-    // buffer_pool::gc();
+    buffer_pool::gc();
 }
 
 int main(int argc, char *args[])
