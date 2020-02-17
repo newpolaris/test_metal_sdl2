@@ -489,6 +489,29 @@ namespace {
     int num_frac = 10000;
 }
 
+template <typename StateType>
+struct StateTracker
+{
+    void invalidate() noexcept { mStateDirty = true; }
+
+    void updateState(const StateType& newState) noexcept {
+        mCurrentState = newState;
+    }
+    
+    bool stateChanged() noexcept {
+        return true;
+    }
+    
+    const StateType& getState() const {
+        return mCurrentState;
+    }
+    
+    bool mStateDirty = true;
+    StateType mCurrentState = {};
+};
+
+using CullModeStateTracker = StateTracker<MTLCullMode>;
+
 namespace {
     id<MTLRenderCommandEncoder> encoder;
     id<MTLDevice> gpu;
@@ -497,6 +520,8 @@ namespace {
     id<MTLCommandQueue> command_queue;
     id<MTLTexture> texture;
     id<MTLRenderPipelineState> pipeline_state;
+
+    CullModeStateTracker cullModeState;
 }
 
 struct Vertex {
@@ -511,7 +536,6 @@ void render_background_texture()
 {
     dispatch_semaphore_wait(m_InflightSemaphore, DISPATCH_TIME_FOREVER);
 
-    
     Vertex fulltriangle[] = {
         { {-1, -1}, {0, 0} },
         { { 3, -1}, {2, 0} },
@@ -533,7 +557,7 @@ void render_background_texture()
     pass.colorAttachments[0].texture = surface.texture;
 
     encoder = [command_buffer renderCommandEncoderWithDescriptor:pass];
-    
+
     std::vector<char> vertices(num_frac*sizeof(float)*24);
     auto* data = vertices.data();
     for (int i = 0; i < num_frac; ++i)
@@ -560,16 +584,21 @@ void render_background_texture()
     vertex_buffer.copy_into_buffer(data, size);
     id<MTLBuffer> gpu_buffer = vertex_buffer.get_gpu_buffer(command_buffer);
     [encoder setVertexBuffer:gpu_buffer offset:0 atIndex:0];
-    for (int i = 0; i < num_frac; i++) {
-        [encoder setRenderPipelineState:pipeline_state];
-        [encoder setFragmentTexture:texture atIndex:0];
-        
-        [encoder setCullMode:MTLCullModeNone];
-
-        [encoder setVertexBufferOffset:i*sizeof(4)*24 atIndex:0];
-        [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+    for (int k = 0; k < 5; k++) {
+        for (int i = 0; i < num_frac; i++) {
+            [encoder setRenderPipelineState:pipeline_state];
+            [encoder setFragmentTexture:texture atIndex:0];
+            
+            MTLCullMode cullMode = MTLCullModeNone;
+            cullModeState.updateState(cullMode);
+            if (cullModeState.stateChanged()) {
+                // [encoder setCullMode:cullMode];
+            }
+            
+            [encoder setVertexBuffer:gpu_buffer offset:i*24*sizeof(float) atIndex:0];
+            [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+        }
     }
-    
     
     [encoder endEncoding];
     
