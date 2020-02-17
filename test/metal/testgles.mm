@@ -584,20 +584,19 @@ void render_background_texture()
     vertex_buffer.copy_into_buffer(data, size);
     id<MTLBuffer> gpu_buffer = vertex_buffer.get_gpu_buffer(command_buffer);
     [encoder setVertexBuffer:gpu_buffer offset:0 atIndex:0];
-    for (int k = 0; k < 5; k++) {
-        for (int i = 0; i < num_frac; i++) {
-            [encoder setRenderPipelineState:pipeline_state];
-            [encoder setFragmentTexture:texture atIndex:0];
-            
-            MTLCullMode cullMode = MTLCullModeNone;
-            cullModeState.updateState(cullMode);
-            if (cullModeState.stateChanged()) {
-                // [encoder setCullMode:cullMode];
-            }
-            
-            [encoder setVertexBuffer:gpu_buffer offset:i*24*sizeof(float) atIndex:0];
-            [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+
+    for (int i = 0; i < num_frac; i++) {
+        [encoder setRenderPipelineState:pipeline_state];
+        [encoder setFragmentTexture:texture atIndex:0];
+        
+        MTLCullMode cullMode = MTLCullModeNone;
+        cullModeState.updateState(cullMode);
+        if (cullModeState.stateChanged()) {
+            [encoder setCullMode:cullMode];
         }
+        
+        [encoder setVertexBuffer:gpu_buffer offset:i*24*sizeof(float) atIndex:0];
+        [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
     }
     
     [encoder endEncoding];
