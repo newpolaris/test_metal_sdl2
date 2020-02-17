@@ -484,18 +484,118 @@ void populate_vertex_data(void* data, size_t size_in_bytes)
     }, /* user = */ nullptr));
 }
 
+namespace {
+    const int max_frac = 10000;
+    int num_frac = 10;
+}
+
+namespace {
+    id<MTLRenderCommandEncoder> encoder;
+    id<MTLDevice> gpu;
+    CAMetalLayer * swapchain;
+    id<MTLCommandBuffer> command_buffer;
+    id<MTLCommandQueue> command_queue;
+    id<MTLTexture> texture;
+    id<MTLRenderPipelineState> pipeline_state;
+}
+
+struct Vertex {
+    float position[4];
+    float coord[2];
+};
+
+static const uint32_t kInFlightCommandBuffers = 3;
+dispatch_semaphore_t m_InflightSemaphore = dispatch_semaphore_create(kInFlightCommandBuffers);
+
+void render_background_texture()
+{
+    dispatch_semaphore_wait(m_InflightSemaphore, DISPATCH_TIME_FOREVER);
+
+    Vertex fulltriangle[] = {
+        { {-1, -1, 0, 1}, {0, 0} },
+        { { 3, -1, 0, 1}, {2, 0} },
+        { {-1,  3, 0, 1}, {0, 2} },
+    };
+
+    // std::vector<char> data(100);
+    // populate_vertex_data(data.data(), sizeof(char)*100);
+
+    id<MTLCommandBuffer> command_buffer = [command_queue commandBuffer];
+
+    [command_buffer addCompletedHandler:^(id<MTLCommandBuffer> command) {
+        m_resource_tracker.clear_resouce(command);
+    }];
+    
+    MTLClearColor color = MTLClearColorMake(0, 0, 0, 1);
+    id<CAMetalDrawable> surface = [swapchain nextDrawable];
+    MTLRenderPassDescriptor *pass = [MTLRenderPassDescriptor renderPassDescriptor];
+    pass.colorAttachments[0].clearColor = color;
+    pass.colorAttachments[0].loadAction  = MTLLoadActionClear;
+    pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+    pass.colorAttachments[0].texture = surface.texture;
+
+    size_t size = sizeof(fulltriangle);
+    metal_buffer vertex_buffer(gpu, size);
+    vertex_buffer.copy_into_buffer(fulltriangle, size);
+    id<MTLBuffer> gpu_buffer = vertex_buffer.get_gpu_buffer(command_buffer);
+    encoder = [command_buffer renderCommandEncoderWithDescriptor:pass];
+    [encoder setRenderPipelineState:pipeline_state];
+    [encoder setFragmentTexture:texture atIndex:0];
+    [encoder setVertexBuffer:gpu_buffer offset:0 atIndex:0];
+    [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+    [encoder endEncoding];
+    [command_buffer presentDrawable:surface];
+
+    // dispatch the command buffer
+    __block dispatch_semaphore_t dispatchSemaphore = m_InflightSemaphore;
+
+    [command_buffer addCompletedHandler:^(id <MTLCommandBuffer> cmdb) {
+        dispatch_semaphore_signal(dispatchSemaphore);
+    }];
+    [command_buffer commit];
+
+    // while flushCommandBuffer (main thread)
+    purge();
+    // and execute commandQueue.flush();
+
+    // endFrame - second thread
+    buffer_pool::gc();
+    
+    for (int i = 0; i < num_frac; ++i)
+    {
+        float sx = -1.f + 2.f / num_frac * i;
+        float ex = -1.f + 2.f / num_frac * (i + 1);
+        float tsx = 0.f + 1.f / num_frac * i;
+        float tex = 0.f + 1.f / num_frac * (i + 1);
+        
+        float vertices[] = {
+            sx, -1.0, tsx, 0.0,
+            ex, -1.0, tex, 0.0,
+            sx, 1.0, tsx, 1.0,
+
+            sx, 1.0, tsx, 1.0,
+            ex, -1.0, tex, 0.0,
+            ex, 1.0, tex, 1.0,
+        };
+
+        uint32_t indices[] = { 0, 1, 2, 3, 4, 5 };
+        
+        
+    }
+}
+
 int main(int argc, char *args[])
 {
     SDL_SetHint(SDL_HINT_RENDER_DRIVER, "metal");
     SDL_InitSubSystem(SDL_INIT_VIDEO);
     SDL_Window *window = SDL_CreateWindow("SDL Metal", -1, -1, 640, 480, SDL_WINDOW_ALLOW_HIGHDPI);
-    SDL_Renderer *renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_PRESENTVSYNC);
-    const CAMetalLayer *swapchain = (__bridge CAMetalLayer *)SDL_RenderGetMetalLayer(renderer);
-    const id<MTLDevice> gpu = swapchain.device;
-    const id<MTLCommandQueue> queue = [gpu newCommandQueue];
+    SDL_Renderer *renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED);
+    swapchain = (__bridge CAMetalLayer *)SDL_RenderGetMetalLayer(renderer);
+    
+    gpu = swapchain.device;
+    command_queue = [gpu newCommandQueue];
     SDL_DestroyRenderer(renderer);
-
-    MTLClearColor color = MTLClearColorMake(0, 0, 0, 1);
+    
     NSError* error = nil;
     
     id<MTLFunction> vertexFunction = createFunction(gpu, vertex_shader_src);
@@ -505,7 +605,8 @@ int main(int argc, char *args[])
     pipelineDesc.vertexFunction = vertexFunction;
     pipelineDesc.fragmentFunction = fragmentFunction;
     pipelineDesc.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
-    id<MTLRenderPipelineState> pipeline_state = [gpu newRenderPipelineStateWithDescriptor:pipelineDesc error:&error];
+    pipeline_state = [gpu newRenderPipelineStateWithDescriptor:pipelineDesc
+                                                                                    error:&error];
     
     el::ImageDataPtr miku;
     miku = el::ImageData::load_memory(miku_image_binray, miku_image_len);
@@ -521,30 +622,14 @@ int main(int argc, char *args[])
                                                                  width:width
                                                                 height:height
                                                              mipmapped:NO];
-    id<MTLTexture> texture = [gpu newTextureWithDescriptor:texDesc];
+    
+    texture = [gpu newTextureWithDescriptor:texDesc];
     MTLRegion region = MTLRegionMake2D(0, 0, width, height);
     [texture replaceRegion:region
                mipmapLevel:0
                  withBytes:data
                bytesPerRow:bytesPerRow];
-    
-    struct Vertex {
-        float position[4];
-        float coord[2];
-    };
-    Vertex fulltriangle[] = {
-        { {-1, -1, 0, 1}, {0, 0} },
-        { { 3, -1, 0, 1}, {2, 0} },
-        { {-1,  3, 0, 1}, {0, 2} },
-    };
-    
-    id<MTLBuffer> vertex_buffer = [gpu newBufferWithBytes:fulltriangle
-                                                   length:sizeof(fulltriangle)
-                                                  options:MTLResourceOptionCPUCacheModeDefault];
-    
-    static const uint32_t kInFlightCommandBuffers = 3;
 
-    dispatch_semaphore_t m_InflightSemaphore = dispatch_semaphore_create(kInFlightCommandBuffers);
 
     bool quit = false;
     SDL_Event e;
@@ -557,55 +642,11 @@ int main(int argc, char *args[])
         }
         
         @autoreleasepool {
-            
-            dispatch_semaphore_wait(m_InflightSemaphore, DISPATCH_TIME_FOREVER);
-
-            std::vector<char> data(100);
-            populate_vertex_data(data.data(), sizeof(char)*100);
-            
-            id<MTLCommandBuffer> buffer = [queue commandBuffer];
-
-            [buffer addCompletedHandler:^(id<MTLCommandBuffer> command) {
-                m_resource_tracker.clear_resouce(command);
-            }];
-            
-            id<CAMetalDrawable> surface = [swapchain nextDrawable];
-            MTLRenderPassDescriptor *pass = [MTLRenderPassDescriptor renderPassDescriptor];
-            pass.colorAttachments[0].clearColor = color;
-            pass.colorAttachments[0].loadAction  = MTLLoadActionClear;
-            pass.colorAttachments[0].storeAction = MTLStoreActionStore;
-            pass.colorAttachments[0].texture = surface.texture;
-
-            size_t size = sizeof(fulltriangle);
-            metal_buffer vertex_buffer(gpu, size);
-            vertex_buffer.copy_into_buffer(fulltriangle, size);
-            id<MTLBuffer> gpu_buffer = vertex_buffer.get_gpu_buffer(buffer);
-            id<MTLRenderCommandEncoder> encoder = [buffer renderCommandEncoderWithDescriptor:pass];
-            [encoder setRenderPipelineState:pipeline_state];
-            [encoder setFragmentTexture:texture atIndex:0];
-            [encoder setVertexBuffer:gpu_buffer offset:0 atIndex:0];
-            [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
-            [encoder endEncoding];
-            [buffer presentDrawable:surface];
-            
-            // dispatch the command buffer
-            __block dispatch_semaphore_t dispatchSemaphore = m_InflightSemaphore;
-
-            [buffer addCompletedHandler:^(id <MTLCommandBuffer> cmdb) {
-                dispatch_semaphore_signal(dispatchSemaphore);
-            }];
-            [buffer commit];
-            
-            // while flushCommandBuffer (main thread)
-            purge();
-            // and execute commandQueue.flush();
-            
-            // endFrame - second thread
-            buffer_pool::gc();
+            render_background_texture();
         }
     }
     
-    terminate(queue);
+    terminate(command_queue);
     
     SDL_DestroyWindow(window);
     SDL_Quit();
