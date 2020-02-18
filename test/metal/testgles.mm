@@ -519,6 +519,15 @@ struct StateTracker
 struct PipelineState {
     id<MTLFunction> vertexFunction = nil;
     id<MTLFunction> fragmentFunction = nil;
+    
+    bool operator==(const PipelineState& rhs) const noexcept {
+        return vertexFunction == rhs.vertexFunction
+            && fragmentFunction == rhs.fragmentFunction;
+    }
+    
+    bool operator!=(const PipelineState& rhs) const noexcept {
+        return !operator==(rhs);
+    }
 };
 
 using CullModeStateTracker = StateTracker<MTLCullMode>;
@@ -541,6 +550,7 @@ namespace {
     id<MTLRenderPipelineState> pipeline_state;
 
     CullModeStateTracker cullModeState;
+    PipelineStateTracker pipelineState;
 }
 
 struct Vertex {
@@ -555,6 +565,9 @@ void render_background_texture()
 {
     dispatch_semaphore_wait(m_InflightSemaphore, DISPATCH_TIME_FOREVER);
 
+    pipelineState.invalidate();
+    cullModeState.invalidate();
+    
     Vertex fulltriangle[] = {
         { {-1, -1}, {0, 0} },
         { { 3, -1}, {2, 0} },
@@ -605,15 +618,25 @@ void render_background_texture()
     [encoder setVertexBuffer:gpu_buffer offset:0 atIndex:0];
 
     NSError *error;
-    MTLRenderPipelineDescriptor *pipelineDesc = [MTLRenderPipelineDescriptor new];
-    pipelineDesc.vertexFunction = vertexFunction;
-    pipelineDesc.fragmentFunction = fragmentFunction;
-    pipelineDesc.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
-    pipeline_state = [gpu newRenderPipelineStateWithDescriptor:pipelineDesc
-                                                         error:&error];
+
     
     for (int i = 0; i < num_frac; i++) {
-        [encoder setRenderPipelineState:pipeline_state];
+        PipelineState pipelineState {
+            .vertexFunction = vertexFunction,
+            .fragmentFunction = fragmentFunction,
+        };
+        ::pipelineState.updateState(pipelineState);
+        if (::pipelineState.stateChanged()) {
+            MTLRenderPipelineDescriptor *pipelineDesc = [MTLRenderPipelineDescriptor new];
+            pipelineDesc.vertexFunction = vertexFunction;
+            pipelineDesc.fragmentFunction = fragmentFunction;
+            pipelineDesc.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
+            pipeline_state = [gpu newRenderPipelineStateWithDescriptor:pipelineDesc
+                                                                        error:&error];
+
+            [encoder setRenderPipelineState:pipeline_state];
+        }
+       
         [encoder setFragmentTexture:texture atIndex:0];
         
         MTLCullMode cullMode = MTLCullModeNone;
@@ -625,7 +648,6 @@ void render_background_texture()
         [encoder setVertexBuffer:gpu_buffer offset:i*24*sizeof(float) atIndex:0];
         [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
     }
-    [pipeline_state release];
     
     [encoder endEncoding];
     
