@@ -95,6 +95,7 @@ id<MTLFunction> createFunction(id<MTLDevice> gpu, const char* source)
     id<MTLLibrary> library = [gpu newLibraryWithSource:objcSource options:nil error:&error];
     id<MTLFunction> function = [library newFunctionWithName:@"main0"];
     [library release];
+    [objcSource release];
     return function;
 }
     
@@ -495,11 +496,16 @@ struct StateTracker
     void invalidate() noexcept { mStateDirty = true; }
 
     void updateState(const StateType& newState) noexcept {
-        mCurrentState = newState;
+        if (mCurrentState != newState) {
+            mCurrentState = newState;
+            mStateDirty = true;
+        }
     }
     
     bool stateChanged() noexcept {
-        return true;
+        bool ret = mStateDirty;
+        mStateDirty = false;
+        return ret;
     }
     
     const StateType& getState() const {
@@ -510,7 +516,18 @@ struct StateTracker
     StateType mCurrentState = {};
 };
 
+struct PipelineState {
+    id<MTLFunction> vertexFunction = nil;
+    id<MTLFunction> fragmentFunction = nil;
+};
+
 using CullModeStateTracker = StateTracker<MTLCullMode>;
+using PipelineStateTracker = StateTracker<PipelineState>;
+
+struct DepthStencilState {
+    MTLCompareFunction compareFunction = MTLCompareFunctionNever;
+    bool depthWriteEnabled = false;
+};
 
 namespace {
     id<MTLRenderCommandEncoder> encoder;
@@ -519,6 +536,8 @@ namespace {
     id<MTLCommandBuffer> command_buffer;
     id<MTLCommandQueue> command_queue;
     id<MTLTexture> texture;
+    id<MTLFunction> vertexFunction;
+    id<MTLFunction> fragmentFunction;
     id<MTLRenderPipelineState> pipeline_state;
 
     CullModeStateTracker cullModeState;
@@ -585,6 +604,14 @@ void render_background_texture()
     id<MTLBuffer> gpu_buffer = vertex_buffer.get_gpu_buffer(command_buffer);
     [encoder setVertexBuffer:gpu_buffer offset:0 atIndex:0];
 
+    NSError *error;
+    MTLRenderPipelineDescriptor *pipelineDesc = [MTLRenderPipelineDescriptor new];
+    pipelineDesc.vertexFunction = vertexFunction;
+    pipelineDesc.fragmentFunction = fragmentFunction;
+    pipelineDesc.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
+    pipeline_state = [gpu newRenderPipelineStateWithDescriptor:pipelineDesc
+                                                         error:&error];
+    
     for (int i = 0; i < num_frac; i++) {
         [encoder setRenderPipelineState:pipeline_state];
         [encoder setFragmentTexture:texture atIndex:0];
@@ -598,6 +625,7 @@ void render_background_texture()
         [encoder setVertexBuffer:gpu_buffer offset:i*24*sizeof(float) atIndex:0];
         [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
     }
+    [pipeline_state release];
     
     [encoder endEncoding];
     
@@ -623,7 +651,7 @@ int main(int argc, char *args[])
 {
     SDL_SetHint(SDL_HINT_RENDER_DRIVER, "metal");
     SDL_InitSubSystem(SDL_INIT_VIDEO);
-    SDL_Window *window = SDL_CreateWindow("SDL Metal", -1, -1, 1280, 1080, SDL_WINDOW_ALLOW_HIGHDPI);
+    SDL_Window *window = SDL_CreateWindow("SDL Metal", -1, -1, 1280, 960, SDL_WINDOW_ALLOW_HIGHDPI);
     SDL_Renderer *renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED);
     swapchain = (__bridge CAMetalLayer *)SDL_RenderGetMetalLayer(renderer);
     
@@ -633,15 +661,8 @@ int main(int argc, char *args[])
     
     NSError* error = nil;
     
-    id<MTLFunction> vertexFunction = createFunction(gpu, vertex_shader_src);
-    id<MTLFunction> fragmentFunction = createFunction(gpu, fragment_shader_src);
-
-    MTLRenderPipelineDescriptor *pipelineDesc = [MTLRenderPipelineDescriptor new];
-    pipelineDesc.vertexFunction = vertexFunction;
-    pipelineDesc.fragmentFunction = fragmentFunction;
-    pipelineDesc.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
-    pipeline_state = [gpu newRenderPipelineStateWithDescriptor:pipelineDesc
-                                                         error:&error];
+    vertexFunction = createFunction(gpu, vertex_shader_src);
+    fragmentFunction = createFunction(gpu, fragment_shader_src);
 
     el::ImageDataPtr miku;
     miku = el::ImageData::load_memory(miku_image_binray, miku_image_len);
