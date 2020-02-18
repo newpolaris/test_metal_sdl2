@@ -18,6 +18,7 @@
 #include <mutex>
 #include <set>
 #include <functional>
+#include <bitset>
 #include "hash.h"
 #include "tsl/robin_map.h"
 
@@ -500,6 +501,52 @@ namespace {
     int num_frac = 10000;
 }
 
+enum class ElementType : uint8_t {
+    BYTE,
+    BYTE2,
+    BYTE3,
+    BYTE4,
+    UBYTE,
+    UBYTE2,
+    UBYTE3,
+    UBYTE4,
+    SHORT,
+    SHORT2,
+    SHORT3,
+    SHORT4,
+    USHORT,
+    USHORT2,
+    USHORT3,
+    USHORT4,
+    INT,
+    UINT,
+    FLOAT,
+    FLOAT2,
+    FLOAT3,
+    FLOAT4,
+    HALF,
+    HALF2,
+    HALF3,
+    HALF4,
+};
+
+struct Attribute {
+    //! attribute is normalized (remapped between 0 and 1)
+    static constexpr uint8_t FLAG_NORMALIZED = 0x1;
+    //! attribute is an integer
+    static constexpr uint8_t FLAG_INTEGER_TARGET = 0x2;
+    
+    uint32_t offset = 0;
+    uint8_t stride = 0;
+    uint8_t buffer = 0xFF;
+    ElementType type = ElementType::BYTE;
+    uint8_t flags = 0x0;
+};
+
+static constexpr size_t MAX_VERTEX_ATTRIBUTE_COUNT = 16; // This is guaranteed by OpenGL ES.
+using AttributeArray = std::array<Attribute, MAX_VERTEX_ATTRIBUTE_COUNT>;
+using AttributeBitset = std::bitset<32>;
+
 template <typename StateType>
 struct StateTracker
 {
@@ -602,6 +649,51 @@ id<MTLDepthStencilState> DepthStateCreator::operator()(id<MTLDevice> device, con
 using DepthStencilStateTracker = StateTracker<DepthStencilState>;
 using DepthStencilStateCache = StateCache<DepthStencilState, id<MTLDepthStencilState>, DepthStateCreator>;
 
+struct PipelineStateCreator {
+    id<MTLRenderPipelineState> operator()(id<MTLDevice> device, const PipelineState& state) noexcept;
+};
+
+id<MTLRenderPipelineState> PipelineStateCreator::operator()(id<MTLDevice> device, const PipelineState& state) noexcept
+{
+    assert(device != nil);
+    
+    MTLVertexDescriptor* vertex = [MTLVertexDescriptor vertexDescriptor];
+              
+    auto posAttrib = vertex.attributes[0];
+    posAttrib.format = MTLVertexFormatFloat2;
+    posAttrib.bufferIndex = 0;
+    posAttrib.offset = 0;
+
+    auto coordAttrib = vertex.attributes[1];
+    coordAttrib.format = MTLVertexFormatFloat2;
+    coordAttrib.bufferIndex = 0;
+    coordAttrib.offset = 8;
+
+    auto layout = vertex.layouts[0];
+    layout.stride = 16;
+    layout.stepRate = 1;
+    layout.stepFunction = MTLVertexStepFunctionPerVertex;
+
+    MTLRenderPipelineDescriptor *pipelineDesc = [MTLRenderPipelineDescriptor new];
+    pipelineDesc.vertexFunction = state.vertexFunction;
+    pipelineDesc.fragmentFunction = state.fragmentFunction;
+    pipelineDesc.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
+    pipelineDesc.vertexDescriptor = vertex;
+    
+    NSError* error = nullptr;
+    auto metalState = [device newRenderPipelineStateWithDescriptor:pipelineDesc error:&error];
+    if (error) {
+        auto description = [error.localizedDescription cStringUsingEncoding:NSUTF8StringEncoding];
+        debug_output(description);
+    }
+    [pipelineDesc release];
+    // [vertex release]; BAD_ACCESS
+              
+    return metalState;
+}
+
+using PipelineStateCache = StateCache<PipelineState, id<MTLRenderPipelineState>, PipelineStateCreator>;
+
 namespace {
     id<MTLRenderCommandEncoder> encoder;
     id<MTLDevice> gpu;
@@ -618,6 +710,7 @@ namespace {
     PipelineStateTracker pipelineState;
 
     DepthStencilStateCache depthStencilStateCache;
+    PipelineStateCache pipelineStateCache;
 }
 
 struct Vertex {
@@ -694,35 +787,8 @@ void render_background_texture()
         };
         ::pipelineState.updateState(pipelineState);
         if (::pipelineState.stateChanged()) {
-            
-            MTLVertexDescriptor* vertex = [MTLVertexDescriptor vertexDescriptor];
-            
-            auto posAttrib = vertex.attributes[0];
-            posAttrib.format = MTLVertexFormatFloat2;
-            posAttrib.bufferIndex = 0;
-            posAttrib.offset = 0;
-            
-            auto coordAttrib = vertex.attributes[1];
-            coordAttrib.format = MTLVertexFormatFloat2;
-            coordAttrib.bufferIndex = 0;
-            coordAttrib.offset = 8;
-            
-            auto layout = vertex.layouts[0];
-            layout.stride = 16;
-            layout.stepRate = 1;
-            layout.stepFunction = MTLVertexStepFunctionPerVertex;
-            
-            MTLRenderPipelineDescriptor *pipelineDesc = [MTLRenderPipelineDescriptor new];
-            pipelineDesc.vertexFunction = vertexFunction;
-            pipelineDesc.fragmentFunction = fragmentFunction;
-            pipelineDesc.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
-            pipelineDesc.vertexDescriptor = vertex;
-            pipeline_state = [gpu newRenderPipelineStateWithDescriptor:pipelineDesc
-                                                                        error:&error];
-            [pipelineDesc release];
-            // [vertex release]; BAD_ACCESS
-            
-            [encoder setRenderPipelineState:pipeline_state];
+            id<MTLRenderPipelineState> state = pipelineStateCache.getOrCreateState(pipelineState);
+            [encoder setRenderPipelineState:state];
         }
         
         DepthStencilState depthState {
@@ -769,6 +835,40 @@ void render_background_texture()
 
 int main(int argc, char *args[])
 {
+    // TODO:
+    AttributeArray attributes = {
+            Attribute {
+                    .offset = 0,
+                    .stride = sizeof(filament::math::float2),
+                    .buffer = 0,
+                    .type = ElementType::FLOAT2,
+                    .flags = 0
+            }
+    };
+    AttributeBitset enabledAttributes;
+    enabledAttributes.set(VertexAttribute::POSITION);
+
+    mVertexBuffer = mDriverApi.createVertexBuffer(1, 1, mVertexCount, attributes,
+            BufferUsage::STATIC);
+    BufferDescriptor vertexBufferDesc(gVertices, sizeof(filament::math::float2) * 3, nullptr);
+    mDriverApi.updateVertexBuffer(mVertexBuffer, 0, std::move(vertexBufferDesc), 0);
+
+    mIndexBuffer = mDriverApi.createIndexBuffer(ElementType::SHORT, mIndexCount,
+            BufferUsage::STATIC);
+    BufferDescriptor indexBufferDesc(gIndices, sizeof(short) * 3, nullptr);
+    mDriverApi.updateIndexBuffer(mIndexBuffer, std::move(indexBufferDesc), 0);
+
+    mRenderPrimitive = mDriverApi.createRenderPrimitive(0);
+
+    mDriverApi.setRenderPrimitiveBuffer(mRenderPrimitive, mVertexBuffer, mIndexBuffer,
+            enabledAttributes.getValue());
+    
+    
+    
+    
+    
+    
+    
     SDL_SetHint(SDL_HINT_RENDER_DRIVER, "metal");
     SDL_InitSubSystem(SDL_INIT_VIDEO);
     SDL_Window *window = SDL_CreateWindow("SDL Metal", -1, -1, 1280, 960, SDL_WINDOW_ALLOW_HIGHDPI);
@@ -808,6 +908,7 @@ int main(int argc, char *args[])
 
 
     depthStencilStateCache.setDevice(gpu);
+    pipelineStateCache.setDevice(gpu);
     
     bool quit = false;
     SDL_Event e;
