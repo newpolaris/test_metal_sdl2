@@ -18,6 +18,8 @@
 #include <mutex>
 #include <set>
 #include <functional>
+#include "hash.h"
+#include "tsl/robin_map.h"
 
 #include "image.h"
 
@@ -41,8 +43,8 @@ using namespace metal;
 
 typedef struct
 {
-    packed_float2 position;
-    packed_float2 texcoord;
+    float2 position [[attribute(0)]];
+    float2 texcoord [[attribute(1)]];
 } vertex_t;
 
 typedef struct
@@ -52,12 +54,12 @@ typedef struct
 } RasterizerData;
 
 vertex RasterizerData main0(
-                            const device vertex_t* vertexArray [[buffer(0)]],
+                            vertex_t v [[stage_in]],
                             unsigned int vID[[vertex_id]])
 {
     RasterizerData data;
-    data.clipSpacePosition = float4(vertexArray[vID].position, 0, 1);
-    data.textureCoordinate = vertexArray[vID].texcoord;
+    data.clipSpacePosition = float4(v.position, 0, 1);
+    data.textureCoordinate = v.texcoord;
     return data;
 }
 )""";
@@ -85,19 +87,7 @@ fragment half4 main0(
     return colorSample;
 }
 )""";
-    
 
-id<MTLFunction> createFunction(id<MTLDevice> gpu, const char* source)
-{
-    NSString* objcSource = [NSString stringWithCString:source
-                                              encoding:NSUTF8StringEncoding];
-    NSError *error = nil;
-    id<MTLLibrary> library = [gpu newLibraryWithSource:objcSource options:nil error:&error];
-    id<MTLFunction> function = [library newFunctionWithName:@"main0"];
-    [library release];
-    [objcSource release];
-    return function;
-}
     
 #if _WIN32
 extern "C" __declspec(dllimport) void __stdcall OutputDebugStringA(const char* _str);
@@ -140,6 +130,26 @@ void debug_output(const char* message)
     NSLog(CFSTR("%s"), message);
 #   endif
 #endif
+}
+    
+
+id<MTLFunction> createFunction(id<MTLDevice> gpu, const char* source)
+{
+    NSString* objcSource = [NSString stringWithCString:source
+                                              encoding:NSUTF8StringEncoding];
+    NSError *error = nil;
+    id<MTLLibrary> library = [gpu newLibraryWithSource:objcSource options:nil error:&error];
+    if (library == nil) {
+        if (error) {
+            auto description =
+            [error.localizedDescription cStringUsingEncoding:NSUTF8StringEncoding];
+            debug_output(description);
+        }
+    }
+    id<MTLFunction> function = [library newFunctionWithName:@"main0"];
+    [library release];
+    [objcSource release];
+    return function;
 }
 
 // TODO:
@@ -536,7 +546,61 @@ using PipelineStateTracker = StateTracker<PipelineState>;
 struct DepthStencilState {
     MTLCompareFunction compareFunction = MTLCompareFunctionNever;
     bool depthWriteEnabled = false;
+    
+    bool operator==(const DepthStencilState& rhs) const noexcept {
+        return compareFunction == rhs.compareFunction
+            && depthWriteEnabled == rhs.depthWriteEnabled;
+    }
+    
+    bool operator!=(const DepthStencilState& rhs) const noexcept {
+        return !operator==(rhs);
+    }
 };
+
+template <typename StateType,
+          typename MetalType,
+          typename StateCreator>
+class StateCache {
+public:
+    
+    StateCache() = default;
+    
+    void setDevice(id<MTLDevice> device) noexcept { mDevice = device; }
+    
+    MetalType getOrCreateState(const StateType& state) noexcept {
+        auto iter = mStateCache.find(state);
+        if (iter == mStateCache.end()) {
+            const auto& metalObject = creator(mDevice, state);
+            iter = mStateCache.emplace_hint(iter, state, metalObject);
+        }
+        return iter.value();
+    }
+    
+private:
+    
+    StateCreator creator;
+    id<MTLDevice> mDevice = nil;
+    
+    using HashFn = el::util::hash::MurmurHashFn<StateType>;
+    tsl::robin_map<StateType, MetalType, HashFn> mStateCache;
+};
+
+struct DepthStateCreator {
+    id<MTLDepthStencilState> operator()(id<MTLDevice> device, const DepthStencilState& state) noexcept;
+};
+
+id<MTLDepthStencilState> DepthStateCreator::operator()(id<MTLDevice> device, const DepthStencilState& state) noexcept
+{
+    MTLDepthStencilDescriptor* depthStencilDescriptor = [MTLDepthStencilDescriptor new];
+    depthStencilDescriptor.depthCompareFunction = state.compareFunction;
+    depthStencilDescriptor.depthWriteEnabled = state.depthWriteEnabled;
+    id<MTLDepthStencilState> depthStencilState = [device newDepthStencilStateWithDescriptor:depthStencilDescriptor];
+    [depthStencilDescriptor release];
+    return depthStencilState;
+}
+
+using DepthStencilStateTracker = StateTracker<DepthStencilState>;
+using DepthStencilStateCache = StateCache<DepthStencilState, id<MTLDepthStencilState>, DepthStateCreator>;
 
 namespace {
     id<MTLRenderCommandEncoder> encoder;
@@ -550,7 +614,10 @@ namespace {
     id<MTLRenderPipelineState> pipeline_state;
 
     CullModeStateTracker cullModeState;
+    DepthStencilStateTracker depthStencilState;
     PipelineStateTracker pipelineState;
+
+    DepthStencilStateCache depthStencilStateCache;
 }
 
 struct Vertex {
@@ -567,6 +634,7 @@ void render_background_texture()
 
     pipelineState.invalidate();
     cullModeState.invalidate();
+    depthStencilState.invalidate();
     
     Vertex fulltriangle[] = {
         { {-1, -1}, {0, 0} },
@@ -619,7 +687,6 @@ void render_background_texture()
 
     NSError *error;
 
-    
     for (int i = 0; i < num_frac; i++) {
         PipelineState pipelineState {
             .vertexFunction = vertexFunction,
@@ -627,16 +694,47 @@ void render_background_texture()
         };
         ::pipelineState.updateState(pipelineState);
         if (::pipelineState.stateChanged()) {
+            
+            MTLVertexDescriptor* vertex = [MTLVertexDescriptor vertexDescriptor];
+            
+            auto posAttrib = vertex.attributes[0];
+            posAttrib.format = MTLVertexFormatFloat2;
+            posAttrib.bufferIndex = 0;
+            posAttrib.offset = 0;
+            
+            auto coordAttrib = vertex.attributes[1];
+            coordAttrib.format = MTLVertexFormatFloat2;
+            coordAttrib.bufferIndex = 0;
+            coordAttrib.offset = 8;
+            
+            auto layout = vertex.layouts[0];
+            layout.stride = 16;
+            layout.stepRate = 1;
+            layout.stepFunction = MTLVertexStepFunctionPerVertex;
+            
             MTLRenderPipelineDescriptor *pipelineDesc = [MTLRenderPipelineDescriptor new];
             pipelineDesc.vertexFunction = vertexFunction;
             pipelineDesc.fragmentFunction = fragmentFunction;
             pipelineDesc.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
+            pipelineDesc.vertexDescriptor = vertex;
             pipeline_state = [gpu newRenderPipelineStateWithDescriptor:pipelineDesc
                                                                         error:&error];
-
+            [pipelineDesc release];
+            // [vertex release]; BAD_ACCESS
+            
             [encoder setRenderPipelineState:pipeline_state];
         }
-       
+        
+        DepthStencilState depthState {
+            .compareFunction = MTLCompareFunctionNever,
+            .depthWriteEnabled = false,
+        };
+        depthStencilState.updateState(depthState);
+        if (depthStencilState.stateChanged()) {
+            id<MTLDepthStencilState> state = depthStencilStateCache.getOrCreateState(depthState);
+            [encoder setDepthStencilState:state];
+        }
+        
         [encoder setFragmentTexture:texture atIndex:0];
         
         MTLCullMode cullMode = MTLCullModeNone;
@@ -709,6 +807,8 @@ int main(int argc, char *args[])
                bytesPerRow:bytesPerRow];
 
 
+    depthStencilStateCache.setDevice(gpu);
+    
     bool quit = false;
     SDL_Event e;
 
