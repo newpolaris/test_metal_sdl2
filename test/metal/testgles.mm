@@ -31,6 +31,7 @@
 #endif
 
 #include "resources.h"
+#include <memory>
 
 //
 // cc sdl-metal-example.m -framework SDL2 -framework Metal -framework QuartzCore
@@ -45,7 +46,7 @@ using namespace metal;
 typedef struct
 {
     float2 position [[attribute(0)]];
-    float2 texcoord [[attribute(1)]];
+    float2 texcoord [[attribute(2)]];
 } vertex_t;
 
 typedef struct
@@ -132,7 +133,6 @@ void debug_output(const char* message)
 #   endif
 #endif
 }
-    
 
 id<MTLFunction> createFunction(id<MTLDevice> gpu, const char* source)
 {
@@ -315,6 +315,9 @@ struct metal_buffer final
 {
     metal_buffer(id<MTLDevice> device, uint32_t size);
     ~metal_buffer();
+    
+    metal_buffer(const metal_buffer& rhs) = delete;
+    metal_buffer& operator=(const metal_buffer& rhs) = delete;
     
     void copy_into_buffer(void* src, size_t size);
     id<MTLBuffer> get_gpu_buffer(id<MTLCommandBuffer> command);
@@ -547,6 +550,14 @@ static constexpr size_t MAX_VERTEX_ATTRIBUTE_COUNT = 16; // This is guaranteed b
 using AttributeArray = std::array<Attribute, MAX_VERTEX_ATTRIBUTE_COUNT>;
 using AttributeBitset = std::bitset<32>;
 
+enum VertexAttribute : uint8_t {
+    POSITION = 0,
+    TANGENTS = 1,
+    COLOR    = 2,
+    UV0      = 3,
+    UV1      = 4,
+};
+
 template <typename StateType>
 struct StateTracker
 {
@@ -653,6 +664,10 @@ struct PipelineStateCreator {
     id<MTLRenderPipelineState> operator()(id<MTLDevice> device, const PipelineState& state) noexcept;
 };
 
+constexpr int VERTEX_BUFFER_START = 6;
+static constexpr uint32_t ZERO_VERTEX_BUFFER = MAX_VERTEX_ATTRIBUTE_COUNT;
+
+
 id<MTLRenderPipelineState> PipelineStateCreator::operator()(id<MTLDevice> device, const PipelineState& state) noexcept
 {
     assert(device != nil);
@@ -661,19 +676,29 @@ id<MTLRenderPipelineState> PipelineStateCreator::operator()(id<MTLDevice> device
               
     auto posAttrib = vertex.attributes[0];
     posAttrib.format = MTLVertexFormatFloat2;
-    posAttrib.bufferIndex = 0;
+    posAttrib.bufferIndex = VERTEX_BUFFER_START + 0;
     posAttrib.offset = 0;
 
-    auto coordAttrib = vertex.attributes[1];
+    auto emptyAttrib = vertex.attributes[1];
+    emptyAttrib.format = MTLVertexFormatFloat4;
+    emptyAttrib.bufferIndex = ZERO_VERTEX_BUFFER;
+    emptyAttrib.offset = 0;
+    
+    auto coordAttrib = vertex.attributes[2];
     coordAttrib.format = MTLVertexFormatFloat2;
-    coordAttrib.bufferIndex = 0;
+    coordAttrib.bufferIndex = VERTEX_BUFFER_START + 0;
     coordAttrib.offset = 8;
 
-    auto layout = vertex.layouts[0];
+    auto layout = vertex.layouts[VERTEX_BUFFER_START + 0];
     layout.stride = 16;
     layout.stepRate = 1;
     layout.stepFunction = MTLVertexStepFunctionPerVertex;
 
+    auto emptyLayout = vertex.layouts[ZERO_VERTEX_BUFFER];
+    emptyLayout.stride = 16;
+    emptyLayout.stepRate = 0;
+    emptyLayout.stepFunction = MTLVertexStepFunctionConstant;
+    
     MTLRenderPipelineDescriptor *pipelineDesc = [MTLRenderPipelineDescriptor new];
     pipelineDesc.vertexFunction = state.vertexFunction;
     pipelineDesc.fragmentFunction = state.fragmentFunction;
@@ -717,6 +742,203 @@ struct Vertex {
     float position[2];
     float coord[2];
 };
+
+struct HwBase {
+#if !defined(NDEBUG) && UTILS_HAS_RTTI
+    const char* typeId = nullptr;
+#endif
+};
+
+struct HwVertexBuffer : public HwBase {
+    AttributeArray attributes;  // 8 * max_vertex_attribute_count
+    uint32_t vertexCount;
+    uint8_t bufferCount;
+    uint8_t attributeCount;
+    uint8_t padding[2]{};
+    
+    HwVertexBuffer(uint8_t bufferCount, uint8_t attributeCount, uint32_t elementCount,
+            AttributeArray const& attributes) noexcept
+            : attributes(attributes),
+              vertexCount(elementCount),
+              bufferCount(bufferCount),
+              attributeCount(attributeCount) {
+    }
+};
+
+static_assert(sizeof(HwVertexBuffer) == 136);
+
+struct HwIndexBuffer : public HwBase {
+    HwIndexBuffer(uint8_t elementSize, uint32_t indexCount) noexcept :
+    count(indexCount), elementSize(elementSize) {
+    }
+    uint32_t count;
+    uint8_t elementSize;
+};
+
+/**
+ * Primitive types
+ */
+enum class PrimitiveType : uint8_t {
+    // don't change the enums values (made to match GL)
+    POINTS      = 0,    //!< points
+    LINES       = 1,    //!< lines
+    TRIANGLES   = 4,    //!< triangles
+    NONE        = 0xFF
+};
+
+
+struct HwRenderPrimitive : public HwBase {
+    HwRenderPrimitive() noexcept = default;
+    uint32_t offset = 0;
+    uint32_t minIndex = 0;
+    uint32_t maxIndex = 0;
+    uint32_t count = 0;
+    uint32_t maxVertexCount = 0;
+    PrimitiveType type = PrimitiveType::TRIANGLES;
+};
+
+struct MetalVertexBuffer : public HwVertexBuffer
+{
+    MetalVertexBuffer(uint8_t bufferCount, uint8_t attributeCount,
+            uint32_t vertexCount, AttributeArray const& attributes);
+    ~MetalVertexBuffer();
+
+    std::vector<metal_buffer*> buffers;
+};
+using FVertexBuffer = std::shared_ptr<MetalVertexBuffer>;
+static constexpr uint32_t VERTEX_BUFFER_COUNT = MAX_VERTEX_ATTRIBUTE_COUNT + 1;
+struct VertexDescription {
+    struct Attribute {
+        MTLVertexFormat format;
+        uint32_t buffer;
+        uint32_t offset;
+    };
+    struct Layout {
+         MTLVertexStepFunction step; // 8 bytes
+         uint64_t stride;            // 8 bytes
+     };
+     Attribute attributes[MAX_VERTEX_ATTRIBUTE_COUNT] = {};      // 256 bytes
+     Layout layouts[VERTEX_BUFFER_COUNT] = {};                   // 272 bytes
+
+    
+};
+
+struct MetalRenderPrimitive : public HwRenderPrimitive {
+    void setBuffers(MetalVertexBuffer* vertexBuffer, uint32_t enabledAttributes);
+    // The pointers to MetalVertexBuffer and MetalIndexBuffer are "weak".
+    // The MetalVertexBuffer and MetalIndexBuffer must outlive the MetalRenderPrimitive.
+
+    MetalVertexBuffer* vertexBuffer = nullptr;
+    // This struct is used to create the pipeline description to describe vertex assembly.
+    VertexDescription vertexDescription = {};
+
+    std::vector<metal_buffer*> buffers;
+    std::vector<NSUInteger> offsets;
+};
+
+constexpr inline MTLVertexFormat getMetalFormat(ElementType type, bool normalized) noexcept {
+    if (normalized) {
+        switch (type) {
+            // Single Component Types
+#if MAC_OS_X_VERSION_MAX_ALLOWED > 101300 || __IPHONE_OS_VERSION_MAX_ALLOWED > 110000
+            case ElementType::BYTE: return MTLVertexFormatCharNormalized;
+            case ElementType::UBYTE: return MTLVertexFormatUCharNormalized;
+            case ElementType::SHORT: return MTLVertexFormatShortNormalized;
+            case ElementType::USHORT: return MTLVertexFormatUShortNormalized;
+#endif
+            // Two Component Types
+            case ElementType::BYTE2: return MTLVertexFormatChar2Normalized;
+            case ElementType::UBYTE2: return MTLVertexFormatUChar2Normalized;
+            case ElementType::SHORT2: return MTLVertexFormatShort2Normalized;
+            case ElementType::USHORT2: return MTLVertexFormatUShort2Normalized;
+            // Three Component Types
+            case ElementType::BYTE3: return MTLVertexFormatChar3Normalized;
+            case ElementType::UBYTE3: return MTLVertexFormatUChar3Normalized;
+            case ElementType::SHORT3: return MTLVertexFormatShort3Normalized;
+            case ElementType::USHORT3: return MTLVertexFormatUShort3Normalized;
+            // Four Component Types
+            case ElementType::BYTE4: return MTLVertexFormatChar4Normalized;
+            case ElementType::UBYTE4: return MTLVertexFormatUChar4Normalized;
+            case ElementType::SHORT4: return MTLVertexFormatShort4Normalized;
+            case ElementType::USHORT4: return MTLVertexFormatUShort4Normalized;
+            default:
+                return MTLVertexFormatInvalid;
+        }
+    }
+    switch (type) {
+        // Single Component Types
+#if MAC_OS_X_VERSION_MAX_ALLOWED > 101300 || __IPHONE_OS_VERSION_MAX_ALLOWED > 110000
+        case ElementType::BYTE: return MTLVertexFormatChar;
+        case ElementType::UBYTE: return MTLVertexFormatUChar;
+        case ElementType::SHORT: return MTLVertexFormatShort;
+        case ElementType::USHORT: return MTLVertexFormatUShort;
+        case ElementType::HALF: return MTLVertexFormatHalf;
+#endif
+        case ElementType::INT: return MTLVertexFormatInt;
+        case ElementType::UINT: return MTLVertexFormatUInt;
+        case ElementType::FLOAT: return MTLVertexFormatFloat;
+        // Two Component Types
+        case ElementType::BYTE2: return MTLVertexFormatChar2;
+        case ElementType::UBYTE2: return MTLVertexFormatUChar2;
+        case ElementType::SHORT2: return MTLVertexFormatShort2;
+        case ElementType::USHORT2: return MTLVertexFormatUShort2;
+        case ElementType::HALF2: return MTLVertexFormatHalf2;
+        case ElementType::FLOAT2: return MTLVertexFormatFloat2;
+        // Three Component Types
+        case ElementType::BYTE3: return MTLVertexFormatChar3;
+        case ElementType::UBYTE3: return MTLVertexFormatUChar3;
+        case ElementType::SHORT3: return MTLVertexFormatShort3;
+        case ElementType::USHORT3: return MTLVertexFormatUShort3;
+        case ElementType::HALF3: return MTLVertexFormatHalf3;
+        case ElementType::FLOAT3: return MTLVertexFormatFloat3;
+        // Four Component Types
+        case ElementType::BYTE4: return MTLVertexFormatChar4;
+        case ElementType::UBYTE4: return MTLVertexFormatUChar4;
+        case ElementType::SHORT4: return MTLVertexFormatShort4;
+        case ElementType::USHORT4: return MTLVertexFormatUShort4;
+        case ElementType::HALF4: return MTLVertexFormatHalf4;
+        case ElementType::FLOAT4: return MTLVertexFormatFloat4;
+    }
+    return MTLVertexFormatInvalid;
+}
+
+void MetalRenderPrimitive::setBuffers(MetalVertexBuffer* vertexBuffer, uint32_t enabledAttributes) {
+    this->vertexBuffer = vertexBuffer;
+    
+    const size_t attributeCount = vertexBuffer->attributes.size();
+
+    buffers.clear();
+    buffers.reserve(attributeCount);
+    offsets.clear();
+    offsets.reserve(attributeCount);
+    
+    uint32_t bufferIndex = 0;
+    for (uint32_t attributeIndex = 0; attributeIndex < attributeCount; attributeIndex++) {
+        if (!(enabledAttributes & (1U << attributeIndex))) {
+            const uint8_t flags = vertexBuffer->attributes[attributeIndex].flags;
+            continue;
+        }
+        const auto& attribute = vertexBuffer->attributes[attributeIndex];
+        
+        buffers.push_back(vertexBuffer->buffers[attribute.buffer]);
+        offsets.push_back(attribute.offset);
+        
+        vertexDescription.attributes[attributeIndex] = {
+            .format = getMetalFormat(attribute.type, attribute.flags & Attribute::FLAG_NORMALIZED),
+            .buffer = bufferIndex,
+            .offset = 0
+        };
+        vertexDescription.layouts[bufferIndex] = {
+                .step = MTLVertexStepFunctionPerVertex,
+                .stride = attribute.stride
+        };
+        bufferIndex++;
+
+    }
+    
+}
+
+MetalRenderPrimitive mRenderPrimitive;
 
 static const uint32_t kInFlightCommandBuffers = 3;
 dispatch_semaphore_t m_InflightSemaphore = dispatch_semaphore_create(kInFlightCommandBuffers);
@@ -776,8 +998,12 @@ void render_background_texture()
     metal_buffer vertex_buffer(gpu, size);
     vertex_buffer.copy_into_buffer(data, size);
     id<MTLBuffer> gpu_buffer = vertex_buffer.get_gpu_buffer(command_buffer);
-    [encoder setVertexBuffer:gpu_buffer offset:0 atIndex:0];
-
+    [encoder setVertexBuffer:gpu_buffer offset:0 atIndex:(VERTEX_BUFFER_START + 0)];
+    
+    // Bind the zero buffer, used for missing vertex attributes.
+    static const char bytes[16] = { 0 };
+    [encoder setVertexBytes:bytes length:16 atIndex:(VERTEX_BUFFER_START + ZERO_VERTEX_BUFFER)];
+    
     NSError *error;
 
     for (int i = 0; i < num_frac; i++) {
@@ -809,7 +1035,7 @@ void render_background_texture()
             [encoder setCullMode:cullMode];
         }
         
-        [encoder setVertexBuffer:gpu_buffer offset:i*24*sizeof(float) atIndex:0];
+        [encoder setVertexBuffer:gpu_buffer offset:i*24*sizeof(float) atIndex:(VERTEX_BUFFER_START + 0)];
         [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
     }
     
@@ -833,42 +1059,103 @@ void render_background_texture()
     buffer_pool::gc();
 }
 
-int main(int argc, char *args[])
+
+MetalVertexBuffer::MetalVertexBuffer(uint8_t bufferCount, uint8_t attributeCount, uint32_t vertexCount,
+                                     AttributeArray const& attributes)
+: HwVertexBuffer(bufferCount, attributeCount, vertexCount, attributes) {
+    buffers.reserve(bufferCount);
+    
+    for (uint8_t bufferIndex = 0; bufferIndex < bufferCount; ++bufferIndex) {
+        uint32_t size = 0;
+        for (auto const& item : attributes) {
+            if (item.buffer == bufferIndex) {
+                uint32_t end = item.offset + vertexCount * item.stride;
+                size = std::max(size, end);
+            }
+        }
+        
+        metal_buffer* buffer = nullptr;
+        if (size > 0) {
+            buffer = new metal_buffer(gpu, size);
+        }
+        buffers.push_back(buffer);
+    }
+}
+
+MetalVertexBuffer::~MetalVertexBuffer() {
+    for (auto* b : buffers) {
+        delete b;
+    }
+    buffers.clear();
+}
+
+struct MetalIndexBuffer : public HwIndexBuffer {
+    MetalIndexBuffer(uint8_t elementSize, uint32_t indexCount);
+
+    metal_buffer buffer;
+};
+
+MetalIndexBuffer::MetalIndexBuffer(uint8_t elementSize, uint32_t indexCount)
+    : HwIndexBuffer(elementSize, indexCount), buffer(gpu, elementSize * indexCount) { }
+
+
+FVertexBuffer createVertexBuffer(uint8_t bufferCount, uint8_t attributeCount,
+                                     uint32_t vertex_count, AttributeArray const& attributes) {
+    auto buffer = std::make_shared<MetalVertexBuffer>(bufferCount, attributeCount, vertex_count, attributes);
+    return buffer;
+}
+
+void updateVertexBuffer(FVertexBuffer buffer, size_t index, BufferDescriptor&& data, uint32_t byteOffset) {
+    buffer->buffers[index]->copy_into_buffer(data.buffer, data.size);
+}
+
+void setRenderPrimitiveRange(MetalRenderPrimitive& primitive, PrimitiveType pt, uint32_t offset, uint32_t minIndex,
+                             uint32_t maxIndex, uint32_t count)
 {
-    // TODO:
+    primitive.type = pt;
+    primitive.offset = 0;
+    primitive.count = count;
+    primitive.minIndex = minIndex;
+    primitive.maxIndex = maxIndex > minIndex ? maxIndex : primitive.maxVertexCount - 1;
+}
+
+void create_primitive()
+{
     AttributeArray attributes = {
             Attribute {
                     .offset = 0,
-                    .stride = sizeof(filament::math::float2),
+                    .stride = sizeof(float)*2,
                     .buffer = 0,
                     .type = ElementType::FLOAT2,
                     .flags = 0
             }
     };
+    
+    size_t mVertexCount = 3;
+    size_t mIndexCount = 3;
+    
+    struct float2 {
+        float x, y;
+    };
+    static constexpr float2 gVertices[6] = {
+        { -1.0, -1.0 },
+        {  1.0, -1.0 },
+        { -1.0,  1.0 }
+    };
+
     AttributeBitset enabledAttributes;
     enabledAttributes.set(VertexAttribute::POSITION);
 
-    mVertexBuffer = mDriverApi.createVertexBuffer(1, 1, mVertexCount, attributes,
-            BufferUsage::STATIC);
-    BufferDescriptor vertexBufferDesc(gVertices, sizeof(filament::math::float2) * 3, nullptr);
-    mDriverApi.updateVertexBuffer(mVertexBuffer, 0, std::move(vertexBufferDesc), 0);
+    auto mVertexBuffer = createVertexBuffer(1, 1, mVertexCount, attributes);
+    BufferDescriptor vertexBufferDesc(gVertices, sizeof(float) * 2 * 3, nullptr);
+    updateVertexBuffer(mVertexBuffer, 0, std::move(vertexBufferDesc), 0);
 
-    mIndexBuffer = mDriverApi.createIndexBuffer(ElementType::SHORT, mIndexCount,
-            BufferUsage::STATIC);
-    BufferDescriptor indexBufferDesc(gIndices, sizeof(short) * 3, nullptr);
-    mDriverApi.updateIndexBuffer(mIndexBuffer, std::move(indexBufferDesc), 0);
+    mRenderPrimitive.setBuffers(mVertexBuffer.get(), enabledAttributes.to_ulong());
+    setRenderPrimitiveRange(mRenderPrimitive, PrimitiveType::TRIANGLES, 0, 0, 2, 3);
+}
 
-    mRenderPrimitive = mDriverApi.createRenderPrimitive(0);
-
-    mDriverApi.setRenderPrimitiveBuffer(mRenderPrimitive, mVertexBuffer, mIndexBuffer,
-            enabledAttributes.getValue());
-    
-    
-    
-    
-    
-    
-    
+int main(int argc, char *args[])
+{
     SDL_SetHint(SDL_HINT_RENDER_DRIVER, "metal");
     SDL_InitSubSystem(SDL_INIT_VIDEO);
     SDL_Window *window = SDL_CreateWindow("SDL Metal", -1, -1, 1280, 960, SDL_WINDOW_ALLOW_HIGHDPI);
