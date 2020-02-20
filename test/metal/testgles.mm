@@ -686,14 +686,19 @@ id<MTLRenderPipelineState> PipelineStateCreator::operator()(id<MTLDevice> device
     
     auto coordAttrib = vertex.attributes[2];
     coordAttrib.format = MTLVertexFormatFloat2;
-    coordAttrib.bufferIndex = VERTEX_BUFFER_START + 0;
-    coordAttrib.offset = 8;
+    coordAttrib.bufferIndex = VERTEX_BUFFER_START + 1;
+    coordAttrib.offset = 0;
 
     auto layout = vertex.layouts[VERTEX_BUFFER_START + 0];
-    layout.stride = 16;
+    layout.stride = 8;
     layout.stepRate = 1;
     layout.stepFunction = MTLVertexStepFunctionPerVertex;
-
+    
+    auto layout2 = vertex.layouts[VERTEX_BUFFER_START + 1];
+    layout2.stride = 8;
+    layout2.stepRate = 1;
+    layout2.stepFunction = MTLVertexStepFunctionPerVertex;
+    
     auto emptyLayout = vertex.layouts[VERTEX_BUFFER_START + ZERO_VERTEX_BUFFER];
     emptyLayout.stride = 16;
     emptyLayout.stepRate = 0;
@@ -993,9 +998,12 @@ void render_background_texture()
         float2 pos;
         float2 coord;
     };
-    static std::vector<vertex_t> vertices(num_frac * sizeof(vertex_t) * 6);
+    static std::vector<float2> positions(num_frac * sizeof(float2) * 6);
+    static std::vector<float2> texcoords(num_frac * sizeof(float2) * 6);
     
-    auto* data = vertices.data();
+    auto* pos = positions.data();
+    auto* coord = texcoords.data();
+    
     for (int i = 0; i < num_frac; ++i)
     {
         float sx = -1.f + 2.f / num_frac * i;
@@ -1003,25 +1011,33 @@ void render_background_texture()
         float tsx = 0.f + 1.f / num_frac * i;
         float tex = 0.f + 1.f / num_frac * (i + 1);
 
-        vertices[i*6 + 0].pos = { sx, -1.0 };
-        vertices[i*6 + 0].coord = { tsx, 0.0 };
-        vertices[i*6 + 1].pos = { ex, -1.0 };
-        vertices[i*6 + 1].coord = { tex, 0.0 };
-        vertices[i*6 + 2].pos = { sx,  1.0 };
-        vertices[i*6 + 2].coord = { tsx, 1.0 };
-        vertices[i*6 + 3].pos = { sx,  1.0 };
-        vertices[i*6 + 3].coord = { tsx, 1.0, };
-        vertices[i*6 + 4].pos = { ex, -1.0 };
-        vertices[i*6 + 4].coord = { tex, 0.0 };
-        vertices[i*6 + 5].pos = { ex,  1.0 };
-        vertices[i*6 + 5].coord = { tex, 1.0, };
+        pos[i*6 + 0] = { sx, -1.0 };
+        pos[i*6 + 1] = { ex, -1.0 };
+        pos[i*6 + 2] = { sx,  1.0 };
+        pos[i*6 + 3] = { sx,  1.0 };
+        pos[i*6 + 4] = { ex, -1.0 };
+        pos[i*6 + 5] = { ex,  1.0 };
+        
+        coord[i*6 + 0] = { tsx, 0.0 };
+        coord[i*6 + 1] = { tex, 0.0 };
+        coord[i*6 + 2] = { tsx, 1.0 };
+        coord[i*6 + 3] = { tsx, 1.0 };
+        coord[i*6 + 4] = { tex, 0.0 };
+        coord[i*6 + 5] = { tex, 1.0, };
     }
     
-    size_t size = vertices.size();
-    metal_buffer vertex_buffer(gpu, size);
-    vertex_buffer.copy_into_buffer(data, size);
-    id<MTLBuffer> gpu_buffer = vertex_buffer.get_gpu_buffer(command_buffer);
-    [encoder setVertexBuffer:gpu_buffer offset:0 atIndex:(VERTEX_BUFFER_START + 0)];
+    size_t size = sizeof(float2) * positions.size();
+    metal_buffer position_buffer(gpu, size);
+    position_buffer.copy_into_buffer(pos, size);
+    id<MTLBuffer> position_gpu_buffer = position_buffer.get_gpu_buffer(command_buffer);
+    
+    size_t coordsize = sizeof(float2) * positions.size();
+    metal_buffer texcoord_buffer(gpu, coordsize);
+    texcoord_buffer.copy_into_buffer(coord, coordsize);
+    id<MTLBuffer> texcoord_gpu_buffer = texcoord_buffer.get_gpu_buffer(command_buffer);
+    
+    [encoder setVertexBuffer:position_gpu_buffer offset:0 atIndex:(VERTEX_BUFFER_START + 0)];
+    [encoder setVertexBuffer:texcoord_gpu_buffer offset:0 atIndex:(VERTEX_BUFFER_START + 1)];
     
     // Bind the zero buffer, used for missing vertex attributes.
     static const char bytes[16] = { 0 };
@@ -1058,7 +1074,8 @@ void render_background_texture()
             [encoder setCullMode:cullMode];
         }
 
-        [encoder setVertexBuffer:gpu_buffer offset:i*24*sizeof(float) atIndex:(VERTEX_BUFFER_START + 0)];
+        [encoder setVertexBuffer:position_gpu_buffer offset:i*6*sizeof(float2) atIndex:(VERTEX_BUFFER_START + 0)];
+        [encoder setVertexBuffer:texcoord_gpu_buffer offset:i*6*sizeof(float2) atIndex:(VERTEX_BUFFER_START + 1)];
         [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
     }
     
