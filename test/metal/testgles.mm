@@ -985,7 +985,16 @@ void render_background_texture()
 
     encoder = [command_buffer renderCommandEncoderWithDescriptor:pass];
 
-    std::vector<char> vertices(num_frac*sizeof(float)*24);
+    struct float2 {
+        float x, y;
+    };
+    
+    struct vertex_t {
+        float2 pos;
+        float2 coord;
+    };
+    static std::vector<vertex_t> vertices(num_frac * sizeof(vertex_t) * 6);
+    
     auto* data = vertices.data();
     for (int i = 0; i < num_frac; ++i)
     {
@@ -994,16 +1003,18 @@ void render_background_texture()
         float tsx = 0.f + 1.f / num_frac * i;
         float tex = 0.f + 1.f / num_frac * (i + 1);
 
-        float subvertex[] = {
-           sx, -1.0, tsx, 0.0,
-           ex, -1.0, tex, 0.0,
-           sx, 1.0, tsx, 1.0,
-
-           sx, 1.0, tsx, 1.0,
-           ex, -1.0, tex, 0.0,
-           ex, 1.0, tex, 1.0,
-        };
-        memcpy(data + i * sizeof(float)*24, subvertex, sizeof(subvertex));
+        vertices[i*6 + 0].pos = { sx, -1.0 };
+        vertices[i*6 + 0].coord = { tsx, 0.0 };
+        vertices[i*6 + 1].pos = { ex, -1.0 };
+        vertices[i*6 + 1].coord = { tex, 0.0 };
+        vertices[i*6 + 2].pos = { sx,  1.0 };
+        vertices[i*6 + 2].coord = { tsx, 1.0 };
+        vertices[i*6 + 3].pos = { sx,  1.0 };
+        vertices[i*6 + 3].coord = { tsx, 1.0, };
+        vertices[i*6 + 4].pos = { ex, -1.0 };
+        vertices[i*6 + 4].coord = { tex, 0.0 };
+        vertices[i*6 + 5].pos = { ex,  1.0 };
+        vertices[i*6 + 5].coord = { tex, 1.0, };
     }
     
     size_t size = vertices.size();
