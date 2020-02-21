@@ -681,7 +681,7 @@ id<MTLRenderPipelineState> PipelineStateCreator::operator()(id<MTLDevice> device
 
     auto emptyAttrib = vertex.attributes[1];
     emptyAttrib.format = MTLVertexFormatFloat4;
-    emptyAttrib.bufferIndex = ZERO_VERTEX_BUFFER;
+    emptyAttrib.bufferIndex = VERTEX_BUFFER_START + ZERO_VERTEX_BUFFER;
     emptyAttrib.offset = 0;
     
     auto coordAttrib = vertex.attributes[2];
@@ -694,7 +694,7 @@ id<MTLRenderPipelineState> PipelineStateCreator::operator()(id<MTLDevice> device
     layout.stepRate = 1;
     layout.stepFunction = MTLVertexStepFunctionPerVertex;
 
-    auto emptyLayout = vertex.layouts[ZERO_VERTEX_BUFFER];
+    auto emptyLayout = vertex.layouts[VERTEX_BUFFER_START + ZERO_VERTEX_BUFFER];
     emptyLayout.stride = 16;
     emptyLayout.stepRate = 0;
     emptyLayout.stepFunction = MTLVertexStepFunctionConstant;
@@ -916,6 +916,18 @@ void MetalRenderPrimitive::setBuffers(MetalVertexBuffer* vertexBuffer, uint32_t 
     for (uint32_t attributeIndex = 0; attributeIndex < attributeCount; attributeIndex++) {
         if (!(enabledAttributes & (1U << attributeIndex))) {
             const uint8_t flags = vertexBuffer->attributes[attributeIndex].flags;
+        
+            // If the attribute is not enabled, bind it to the zero buffer. It's a Metal error for a
+            // shader to read from missing vertex attributes.
+            vertexDescription.attributes[attributeIndex] = {
+                 .format = MTLVertexFormatFloat4,
+                 .buffer = ZERO_VERTEX_BUFFER,
+                 .offset = 0
+            };
+            vertexDescription.layouts[ZERO_VERTEX_BUFFER] = {
+                 .step = MTLVertexStepFunctionConstant,
+                 .stride = 16
+            };
             continue;
         }
         const auto& attribute = vertexBuffer->attributes[attributeIndex];
@@ -1034,7 +1046,7 @@ void render_background_texture()
         if (cullModeState.stateChanged()) {
             [encoder setCullMode:cullMode];
         }
-        
+
         [encoder setVertexBuffer:gpu_buffer offset:i*24*sizeof(float) atIndex:(VERTEX_BUFFER_START + 0)];
         [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
     }
