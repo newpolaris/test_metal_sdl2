@@ -13,6 +13,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <math.h>
+#include "glad/glad.h"
 
 #ifdef __EMSCRIPTEN__
 #include <emscripten/emscripten.h>
@@ -92,7 +93,7 @@ quit(int rc)
 #define GL_CHECK(x) \
         x; \
         { \
-          GLenum glError = ctx.glGetError(); \
+          GLenum glError = glGetError(); \
           if(glError != GL_NO_ERROR) { \
             SDL_Log("glGetError() = %i (0x%.8x) at line %i\n", glError, glError, __LINE__); \
             quit(1); \
@@ -204,22 +205,22 @@ process_shader(GLuint *shader, const char * source, GLint shader_type)
     GLsizei length;
 
     /* Create shader and load into GL. */
-    *shader = GL_CHECK(ctx.glCreateShader(shader_type));
+    *shader = GL_CHECK(glCreateShader(shader_type));
 
     shaders[0] = source;
 
-    GL_CHECK(ctx.glShaderSource(*shader, 1, shaders, NULL));
+    GL_CHECK(glShaderSource(*shader, 1, shaders, NULL));
 
     /* Clean up shader source. */
     shaders[0] = NULL;
 
     /* Try compiling the shader. */
-    GL_CHECK(ctx.glCompileShader(*shader));
-    GL_CHECK(ctx.glGetShaderiv(*shader, GL_COMPILE_STATUS, &status));
+    GL_CHECK(glCompileShader(*shader));
+    GL_CHECK(glGetShaderiv(*shader, GL_COMPILE_STATUS, &status));
 
     /* Dump debug info (source and log) if compilation failed. */
     if(status != GL_TRUE) {
-        ctx.glGetProgramInfoLog(*shader, sizeof(buffer), &length, &buffer[0]);
+        glGetProgramInfoLog(*shader, sizeof(buffer), &length, &buffer[0]);
         buffer[length] = '\0';
         SDL_Log("Shader compilation failed: %s", buffer);fflush(stderr);
         quit(-1);
@@ -396,7 +397,7 @@ Render(unsigned int width, unsigned int height, shader_data* data)
     perspective_matrix(45.0f, (float)width/height, 0.01f, 100.0f, matrix_perspective);
     multiply_matrix(matrix_perspective, matrix_modelview, matrix_mvp);
 
-    GL_CHECK(ctx.glUniformMatrix4fv(data->attr_mvp, 1, GL_FALSE, matrix_mvp));
+    GL_CHECK(glUniformMatrix4fv(data->attr_mvp, 1, GL_FALSE, matrix_mvp));
 
     data->angle_x += 3;
     data->angle_y += 2;
@@ -409,8 +410,8 @@ Render(unsigned int width, unsigned int height, shader_data* data)
     if(data->angle_z >= 360) data->angle_z -= 360;
     if(data->angle_z < 0) data->angle_z += 360;
 
-    GL_CHECK(ctx.glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT));
-    GL_CHECK(ctx.glDrawArrays(GL_TRIANGLES, 0, 36));
+    GL_CHECK(glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT));
+    GL_CHECK(glDrawArrays(GL_TRIANGLES, 0, 36));
 }
 
 int done;
@@ -440,7 +441,7 @@ void loop()
                             }
                             /* Change view port to the new window dimensions */
                             SDL_GL_GetDrawableSize(state->windows[i], &w, &h);
-                            ctx.glViewport(0, 0, w, h);
+                            glViewport(0, 0, w, h);
                             state->window_w = event.window.data1;
                             state->window_h = event.window.data2;
                             /* Update window content */
@@ -562,6 +563,8 @@ main(int argc, char *argv[])
         }
     }
 
+    gladLoadGLES2Loader(SDL_GL_GetProcAddress);
+
     /* Important: call this *after* creating the context */
     if (LoadContext(&ctx) < 0) {
         SDL_Log("Could not load GLES2 functions\n");
@@ -580,10 +583,10 @@ main(int argc, char *argv[])
     SDL_GetCurrentDisplayMode(0, &mode);
     SDL_Log("Screen bpp: %d\n", SDL_BITSPERPIXEL(mode.format));
     SDL_Log("\n");
-    SDL_Log("Vendor     : %s\n", ctx.glGetString(GL_VENDOR));
-    SDL_Log("Renderer   : %s\n", ctx.glGetString(GL_RENDERER));
-    SDL_Log("Version    : %s\n", ctx.glGetString(GL_VERSION));
-    SDL_Log("Extensions : %s\n", ctx.glGetString(GL_EXTENSIONS));
+    SDL_Log("Vendor     : %s\n", glGetString(GL_VENDOR));
+    SDL_Log("Renderer   : %s\n", glGetString(GL_RENDERER));
+    SDL_Log("Version    : %s\n", glGetString(GL_VERSION));
+    SDL_Log("Extensions : %s\n", glGetString(GL_EXTENSIONS));
     SDL_Log("\n");
 
     status = SDL_GL_GetAttribute(SDL_GL_RED_SIZE, &value);
@@ -655,7 +658,7 @@ main(int argc, char *argv[])
             continue;
         }
         SDL_GL_GetDrawableSize(state->windows[i], &w, &h);
-        ctx.glViewport(0, 0, w, h);
+        glViewport(0, 0, w, h);
 
         data = &datas[i];
         data->angle_x = 0; data->angle_y = 0; data->angle_z = 0;
@@ -665,32 +668,32 @@ main(int argc, char *argv[])
         process_shader(&data->shader_frag, _shader_frag_src, GL_FRAGMENT_SHADER);
 
         /* Create shader_program (ready to attach shaders) */
-        data->shader_program = GL_CHECK(ctx.glCreateProgram());
+        data->shader_program = GL_CHECK(glCreateProgram());
 
         /* Attach shaders and link shader_program */
-        GL_CHECK(ctx.glAttachShader(data->shader_program, data->shader_vert));
-        GL_CHECK(ctx.glAttachShader(data->shader_program, data->shader_frag));
-        GL_CHECK(ctx.glLinkProgram(data->shader_program));
+        GL_CHECK(glAttachShader(data->shader_program, data->shader_vert));
+        GL_CHECK(glAttachShader(data->shader_program, data->shader_frag));
+        GL_CHECK(glLinkProgram(data->shader_program));
 
         /* Get attribute locations of non-fixed attributes like color and texture coordinates. */
-        data->attr_position = GL_CHECK(ctx.glGetAttribLocation(data->shader_program, "av4position"));
-        data->attr_color = GL_CHECK(ctx.glGetAttribLocation(data->shader_program, "av3color"));
+        data->attr_position = GL_CHECK(glGetAttribLocation(data->shader_program, "av4position"));
+        data->attr_color = GL_CHECK(glGetAttribLocation(data->shader_program, "av3color"));
 
         /* Get uniform locations */
-        data->attr_mvp = GL_CHECK(ctx.glGetUniformLocation(data->shader_program, "mvp"));
+        data->attr_mvp = GL_CHECK(glGetUniformLocation(data->shader_program, "mvp"));
 
-        GL_CHECK(ctx.glUseProgram(data->shader_program));
+        GL_CHECK(glUseProgram(data->shader_program));
 
         /* Enable attributes for position, color and texture coordinates etc. */
-        GL_CHECK(ctx.glEnableVertexAttribArray(data->attr_position));
-        GL_CHECK(ctx.glEnableVertexAttribArray(data->attr_color));
+        GL_CHECK(glEnableVertexAttribArray(data->attr_position));
+        GL_CHECK(glEnableVertexAttribArray(data->attr_color));
 
         /* Populate attributes for position, color and texture coordinates etc. */
-        GL_CHECK(ctx.glVertexAttribPointer(data->attr_position, 3, GL_FLOAT, GL_FALSE, 0, _vertices));
-        GL_CHECK(ctx.glVertexAttribPointer(data->attr_color, 3, GL_FLOAT, GL_FALSE, 0, _colors));
+        GL_CHECK(glVertexAttribPointer(data->attr_position, 3, GL_FLOAT, GL_FALSE, 0, _vertices));
+        GL_CHECK(glVertexAttribPointer(data->attr_color, 3, GL_FLOAT, GL_FALSE, 0, _colors));
 
-        GL_CHECK(ctx.glEnable(GL_CULL_FACE));
-        GL_CHECK(ctx.glEnable(GL_DEPTH_TEST));
+        GL_CHECK(glEnable(GL_CULL_FACE));
+        GL_CHECK(glEnable(GL_DEPTH_TEST));
     }
 
     /* Main render loop */
